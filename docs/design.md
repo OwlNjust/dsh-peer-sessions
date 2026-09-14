@@ -292,6 +292,9 @@ peer 消息**不能**：批准任何东西、修改任何权限、发起新的 p
 | 命令面与工具面同源 | `/peer connect` 报告 `pc-2 / 本对话内 / 200 / 未运行`，`peer_list` 报告 `"CodeTools" · tier=session · remaining=200 · peer=not running`，逐项一致 |
 | **撤销** | `/peer revoke CodeTools` → 双方视图同步为空；**紧接着 `peer_send` 重新弹出授权卡片**，证明撤销是在投递校验处生效，而非仅仅从列表里抹掉 |
 | **拒绝** | 拒绝那张卡片后：不创建通道、收件箱不变、对端全程仍是 `not running`（没被唤醒）、零 token |
+| **子代理拿不到授权** | 探针子代理报告 4 个 `peer_*` 工具**全部可见**（没有任何 preset 配置 `toolFilter`，所以全局工具被完整继承），但 `peer_send` 被 `callerGuard` 拒绝：*"only a top-level conversation can hold a peer channel…"*。**没有弹出任何卡片**——`isRuntimeRoot` 先返回 false，`userQuestions.ask` 从未被调用，因此不会出现契约警告的"永久阻塞" |
+
+> 关于上表最后一行：本插件的子代理安全性来自**代码守卫**，不是"工具不存在"。这是有意的（D4：无授权时工具返回说明而非报错），但也意味着若 `isRuntimeRoot` 判断出错，工具就会落到子代理手里。守卫因此是承重件，不是装饰。
 
 ### 仍未在生产中验证的部分
 
