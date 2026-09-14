@@ -11,6 +11,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readdirSync, readFileSync } from 'node:fs'
 
 import { classify, listAddressable, resolveTarget, labelOf, stripInvisible, displayToken } from '../lib/addressable.js'
 import {
@@ -353,6 +354,47 @@ test('a refusal with many candidates lists a bounded number of them', async () =
 // Pasted text carries zero-width characters that are invisible and not matched
 // by `\s`. Observed live: a pasted `/peer connect …` answered
 // `unknown subcommand "connect"` while listing `connect` as available.
+// The first version of the class stopped at U+2064, so six common paste-borne
+// invisibles still got through — bidi ISOLATES, soft hyphen, Arabic letter mark,
+// Mongolian vowel separator, variation selectors — and reproduced the exact
+// "unknown subcommand「connect」" incident the function exists to prevent.
+test('stripInvisible covers the invisibles a paste actually carries', () => {
+  const cases = {
+    'U+200B zero-width space': '\u200B',
+    'U+202E right-to-left override': '\u202E',
+    'U+2066 left-to-right isolate': '\u2066',
+    'U+2069 pop directional isolate': '\u2069',
+    'U+00AD soft hyphen': '\u00AD',
+    'U+061C Arabic letter mark': '\u061C',
+    'U+180E Mongolian vowel separator': '\u180E',
+    'U+FE0F variation selector': '\uFE0F',
+    'U+FEFF byte order mark': '\uFEFF',
+  }
+  for (const [name, char] of Object.entries(cases)) {
+    assert.equal(stripInvisible('a' + char + 'b'), 'ab', name + ' must be stripped')
+  }
+  // And it must not touch legitimate text.
+  assert.equal(stripInvisible('Design session · 中文 (v2)'), 'Design session · 中文 (v2)')
+})
+
+// A conversation may genuinely be named "Design session". Treating the trailing
+// word as a tier resolved the OTHER conversation named "Design" — and with an
+// explicit tier no card is raised, so the misroute was completely silent.
+test('connect prefers the literal title over eating a trailing tier word', async () => {
+  const ctx = fakeCtx({
+    items: [titled(SELF, 'Me'), titled(PEER, 'Design session'), titled('session-other', 'Design')],
+    agentIds: [SELF, PEER],
+  })
+  const core = new PeerCore(ctx)
+  const handlers = captureCommands(core)
+  const result = await handlers.peer({ agent: { id: SELF }, rawInput: 'connect Design session session', signal: undefined })
+  assert.match(result.text, /channel|通道/i)
+  const channel = core.store.channelsFor(SELF)[0]
+  assert.ok(channel, 'a channel was opened')
+  // It connected to the conversation literally named "Design session"...
+  assert.equal(core.store.other(channel, SELF), PEER, 'the literal title wins')
+})
+
 test('stripInvisible removes zero-width and bidi-control characters', () => {
   assert.equal(stripInvisible('con\u200Bnect'), 'connect')
   assert.equal(stripInvisible('a\uFEFFb'), 'ab')
@@ -734,7 +776,8 @@ test('a once grant buys one exchange: the answer rides the same approval', async
     true,
     'the marker must reach whichever end holds the request',
   )
-  assert.equal(core.store.inboxFor(PEER)[0].status, 'replied')
+  const markedRequest = core.store.inboxFor(PEER).find((entry) => entry.requestId === 'req-1')
+  assert.equal(markedRequest.status, 'replied')
 })
 
 test('a once grant does not carry an unrelated second message', async () => {
@@ -1025,51 +1068,28 @@ test('a settings provider that throws on read falls back instead of breaking', (
 test('both shipped locales cover every key the plugin asks for', () => {
   const en = translator('en')
   const zh = translator('zh')
-  for (const key of [
-    'cmd.peers.desc',
-    'cmd.peer.desc',
-    'cmd.peer.hint',
-    'channel.none',
-    'channel.header',
-    'channel.line',
-    'channel.revokeHintLine',
-    'usage.peer',
-    'usage.connect',
-    'usage.revoke',
-    'usage.progress',
-    'peer.unknownSub',
-    'connect.already',
-    'connect.declined',
-    'connect.ok',
-    'revoke.none',
-    'revoke.done',
-    'resolve.many',
-    'resolve.noneWithCandidates',
-    'resolve.noneAlone',
-    'resolve.hidden.archived',
-    'resolve.hidden.subagent',
-    'resolve.hidden.blank',
-    'resolve.moreCandidates',
-    'resolve.selfNotVisible',
-    'resolve.peerNotVisible',
-    'budget.spent',
-    'progress.conversation',
-    'progress.projected',
-    'progress.goal',
-    'progress.todos',
-    'progress.queued',
-    'progress.turns',
-    'progress.turn',
-    'progress.other',
-    'consent.grant.header',
-    'consent.grant.question',
-    'consent.grant.detail',
-    'consent.grant.once',
-    'consent.grant.session',
-    'consent.grant.decline',
-    'consent.grant.wakeNote',
-    'silent.needsRunning',
-  ]) {
+
+  // The key set is DISCOVERED from the source, not hand-listed. The previous
+  // version enumerated 43 keys by hand and had drifted: 19 keys that lib/ asks
+  // for — including every loop-protection and overdue-timeout string — were
+  // never checked, so a missing translation there would have shipped as a bare
+  // identifier. Scanning cannot drift.
+  const dir = new URL('../lib/', import.meta.url)
+  const sources = readdirSync(dir).filter((name) => name.endsWith('.js'))
+  const keys = new Set()
+  for (const name of sources) {
+    const text = readFileSync(new URL(name, dir), 'utf8')
+    // `t('key')` / `t('key', params)` and `this.t('key', ...)`.
+    for (const match of text.matchAll(/\bt\(\s*'([a-zA-Z][\w.-]*)'/g)) keys.add(match[1])
+  }
+  assert.ok(keys.size > 40, `expected to discover the plugin's keys, found ${keys.size}`)
+
+  // Keys built at runtime from a variable, which a scan cannot see.
+  for (const key of ['tier.once', 'tier.session', 'resolve.hidden.archived', 'resolve.hidden.subagent', 'resolve.hidden.blank']) {
+    keys.add(key)
+  }
+
+  for (const key of keys) {
     // A missing key returns the key itself, which would surface as raw
     // identifiers in the palette or the consent card.
     assert.notEqual(en(key), key, `en is missing ${key}`)
@@ -1079,6 +1099,11 @@ test('both shipped locales cover every key the plugin asks for', () => {
   }
   assert.match(zh('consent.grant.question', { peer: 'X' }), /X/)
   assert.match(en('consent.grant.question', { peer: 'X' }), /X/)
+
+  // `fill` must treat null like "no parameters": reading a property off null
+  // threw a TypeError from the string layer, which the tool catch-all reported
+  // to the model as though it were an answer.
+  assert.doesNotThrow(() => en('cmd.peers.desc', null))
 })
 
 test('the consent card is asked in the client language and still maps back', async () => {
@@ -1296,6 +1321,159 @@ test('a request is remembered as pending, and an answer retires it', async () =>
   })
   assert.equal(core.noteReply(PEER, 'req-1', answered.channel), true)
   assert.deepEqual(core.store.pendingFor(SELF), [], 'an answer retires the deadline')
+})
+
+// ------------------------------------- audit fixes (live harness + two audits)
+
+// H1 says a delivery never reaches a conversation the human cannot see. The
+// grant card is the long pole: the human can archive the peer WHILE reading it,
+// and the addressable set has to be re-read when they answer. It was not, so an
+// archived peer still received the message.
+test('archiving the peer while the card is open cancels the delivery', async () => {
+  const ctx = fakeCtx({ items: [summary(SELF), summary(PEER)], agentIds: [SELF, PEER] })
+  // The card itself archives the peer, modelling the human acting while it is up.
+  const archived = []
+  ctx.userQuestions.ask = async (request) => {
+    archived.push(PEER)
+    ctx.workspaceRegistry.archivedSessionIds = archived
+    const question = request.questions[0]
+    return { answers: [{ id: question.id, selected: [question.options[1].label] }] }
+  }
+  const core = new PeerCore(ctx)
+  await assert.rejects(
+    () =>
+      core.deliver({
+        selfAgent: ctx.agents.get(SELF),
+        selfLabel: 'Me',
+        peerEntry: { sessionId: PEER, label: 'Peer', running: true, projections: {} },
+        payload: { kind: 'notice', summary: 'should not arrive' },
+      }),
+    PeerRefusal,
+    'the re-read after the grant must refuse',
+  )
+  assert.equal(ctx.received.length, 0, 'nothing may be delivered to an archived peer')
+})
+
+// The pre-prompt liveness read is a snapshot; idle conversations go cold here.
+// Reusing it handed the message to a disposed loop while reporting success, and
+// the card had understated the cost (it promised no wake).
+test('a peer that goes cold during the card is woken, not handed a stale agent', async () => {
+  const ctx = fakeCtx({ items: [summary(SELF), summary(PEER)], agentIds: [SELF, PEER], revive: true })
+  const stale = ctx.agents.get(PEER)
+  ctx.userQuestions.ask = async (request) => {
+    // The peer finishes its turn and is released while the human reads the card.
+    ctx.drop(PEER)
+    const question = request.questions[0]
+    return { answers: [{ id: question.id, selected: [question.options[1].label] }] }
+  }
+  const core = new PeerCore(ctx)
+  const result = await core.deliver({
+    selfAgent: ctx.agents.get(SELF),
+    selfLabel: 'Me',
+    peerEntry: { sessionId: PEER, label: 'Peer', running: true, projections: {} },
+    payload: { kind: 'notice', summary: 'hello' },
+  })
+  assert.equal(result.outcome, 'delivered')
+  const fresh = ctx.agents.get(PEER)
+  assert.notEqual(fresh, stale, 'the target must be re-read, not the old snapshot')
+  assert.equal(ctx.received.length, 1)
+})
+
+// Two deliveries in the same millisecond share an id when the id borrows the
+// CHANNEL counter: `peer_inbox(id)` then returns the wrong body and the other
+// item is unreachable by id. Both auditors found this independently.
+test('message ids stay unique within one millisecond', () => {
+  const store = new PeerStore()
+  const realNow = Date.now
+  Date.now = () => 1_700_000_000_000
+  try {
+    const ids = [store.nextMessageId(), store.nextMessageId(), store.nextMessageId()]
+    assert.equal(new Set(ids).size, ids.length, 'ids collided inside one millisecond')
+  } finally {
+    Date.now = realNow
+  }
+})
+
+// Naming your OWN request in `replyTo` must not retire your deadline (killing
+// the overdue notice) nor mark the peer's inbox item answered. The direction
+// check existed for the `once` budget and was missing for pending/inbox.
+test('a reply naming your own request changes nothing', async () => {
+  const ctx = fakeCtx({ items: [summary(SELF), summary(PEER)], agentIds: [SELF, PEER], grant: 1 })
+  const core = new PeerCore(ctx)
+  const entry = (id, label) => ({ sessionId: id, label, running: true, projections: {} })
+  // The real minted id: this drives the genuine path, so the id it actually
+  // issued is the only one the direction record knows.
+  const asked = await core.deliver({
+    selfAgent: ctx.agents.get(SELF),
+    selfLabel: 'Me',
+    peerEntry: entry(PEER, 'Peer'),
+    payload: { kind: 'none', summary: 'x' },
+  })
+  assert.equal(asked.outcome, 'delivered')
+  const reqId = core.nextRequestId()
+  await core.deliver({
+    selfAgent: ctx.agents.get(SELF),
+    selfLabel: 'Me',
+    peerEntry: entry(PEER, 'Peer'),
+    payload: { kind: 'request', summary: 'please adapt', requestId: reqId },
+  })
+  assert.equal(core.store.pendingFor(SELF).length, 1)
+
+  const selfReply = await core.deliver({
+    selfAgent: ctx.agents.get(SELF),
+    selfLabel: 'Me',
+    peerEntry: entry(PEER, 'Peer'),
+    payload: { kind: 'reply', summary: 'to myself', replyTo: reqId },
+  })
+  assert.equal(core.noteReply(SELF, reqId, selfReply.channel), false, 'own request is not answerable')
+  assert.equal(core.store.pendingFor(SELF).length, 1, 'own deadline must survive')
+  // By id, not by position: the inbox is newest-first, so `[0]` is whatever
+  // arrived last — here the reply that must NOT have been treated as an answer.
+  const requestItem = core.store.inboxFor(PEER).find((entry) => entry.requestId === reqId)
+  assert.equal(requestItem.status, 'unread-unanswered', 'nothing was answered')
+})
+
+// Silent + cold is self-contradictory (§7). The refusal used to sit inside the
+// "no channel yet" branch, so with a channel open the peer WAS woken and the
+// tool still reported "the peer was not woken".
+test('silent delivery to a cold peer is refused even with a channel open', async () => {
+  const ctx = fakeCtx({ items: [summary(SELF), summary(PEER)], agentIds: [SELF, PEER], grant: 1, revive: true })
+  const core = new PeerCore(ctx)
+  const peerEntry = { sessionId: PEER, label: 'Peer', running: true, projections: {} }
+  await core.deliver({ selfAgent: ctx.agents.get(SELF), selfLabel: 'Me', peerEntry, payload: { kind: 'notice', summary: 'opener' } })
+
+  ctx.drop(PEER) // the peer goes cold, as idle conversations do
+  const before = ctx.received.length
+  const result = await core.deliver({
+    selfAgent: ctx.agents.get(SELF),
+    selfLabel: 'Me',
+    peerEntry,
+    payload: { kind: 'notice', summary: 'quietly' },
+    silent: true,
+  })
+  assert.equal(result.outcome, 'silent-needs-running')
+  assert.equal(ctx.received.length, before, 'nothing may be delivered, and the peer must not be woken')
+})
+
+// The hop guard needs only the sender, so a refusal must arrive BEFORE the human
+// answers a card and before a cold peer is woken and billed for a delivery that
+// never happens.
+test('the hop refusal arrives before the consent card', async () => {
+  const ctx = fakeCtx({ items: [summary(SELF), summary(PEER)], agentIds: [SELF, PEER], grant: 1, revive: true })
+  const core = new PeerCore(ctx)
+  core.store.noteInboundHop(SELF, HOP_LIMIT)
+  await assert.rejects(
+    () =>
+      core.deliver({
+        selfAgent: ctx.agents.get(SELF),
+        selfLabel: 'Me',
+        peerEntry: { sessionId: PEER, label: 'Peer', running: true, projections: {} },
+        payload: { kind: 'reply', summary: 'too far', replyTo: 'req-x' },
+      }),
+    (error) => error instanceof PeerRefusal && /hop|跳/.test(error.message),
+  )
+  assert.equal(ctx.asked.length, 0, 'the human must not be asked to approve a refusal')
+  assert.equal(core.store.between(SELF, PEER), undefined, 'and no channel may be opened')
 })
 
 // -------------------------------------------------------------- plugin entry
@@ -1520,25 +1698,26 @@ test('reading an unanswered request keeps it marked as unanswered', async () => 
   // Kept so the marker can be asserted by id after the reply goes out.
   const requestMessageId = requestId
 
-  // And it is still answerable, on the same grant: `markReplied` accepting a
-  // read-but-unanswered request is what keeps "read" from breaking the one
-  // exchange.
-  const answered = await tools.get('peer_send').execute(
-    { peer: SELF, kind: 'reply', summary: 'adapted', replyTo: realRequestId },
-    { agent: ctx.agents.get(PEER), signal: new AbortController().signal, deferContext() {} },
-  )
+  // THIS side must answer it: the request was issued by the PEER, so the reply
+  // comes from SELF. An earlier draft had the PEER answer its OWN request,
+  // which the direction guard now (correctly) refuses — the test had been
+  // passing for the wrong reason, and only the guard exposed it.
+  const answered = await call('peer_send', { peer: PEER, kind: 'reply', summary: 'adapted', replyTo: realRequestId })
   assert.match(answered, /Delivered a reply/)
-  const settled = await call('peer_inbox', {})
-  assert.doesNotMatch(settled, /never answered/, 'the request is answered now')
-  // Assert the STATE the tool path left behind, not a word that happens to be in
-  // the reply's own summary: the earlier version matched the summary text and so
-  // passed whether or not the marker was ever written.
   const answeredRequest = store.findInboxItem(SELF, requestMessageId)
   assert.equal(
     answeredRequest.status,
     'replied',
     'answering a request marks the request it answers, not merely the reply it sent',
   )
+  const settled = await call('peer_inbox', {})
+  assert.doesNotMatch(settled, /never answered/, 'the request is answered now')
+
+  // And the direction guard holds for a session naming its OWN request: nothing
+  // is retired and nothing is marked.
+  const backToSelf = await call('peer_send', { peer: SELF, kind: 'reply', summary: 'to myself', replyTo: realRequestId })
+  assert.doesNotMatch(backToSelf, /Delivered a reply/)
+  assert.equal(store.findInboxItem(SELF, requestMessageId).status, 'replied', 'unchanged by the bogus reply')
 })
 
 // The live harness found this one: `peer_inbox` returned "Peer inbox is empty."
@@ -1593,6 +1772,27 @@ test('the retrieval header states an overdue deadline on its own line', async ()
   assert.match(late, /^deadline: OVERDUE$/m, 'the header reports the third axis')
   // And it stays out of `state:`: one field must not conflate three facts.
   assert.doesNotMatch(late, /state: [^\n]*OVERDUE/)
+})
+
+// Revoking is how a human cleans up, and the moment they most need it is right
+// after archiving the peer — which is precisely when resolving through the
+// addressable set refused. The channel stayed listed as NOT VISIBLE until the
+// process restarted.
+test('a channel to an archived peer can still be revoked', async () => {
+  const ctx = fakeCtx({
+    items: [titled(SELF, 'Me'), titled(PEER, 'Peer')],
+    agentIds: [SELF, PEER],
+  })
+  const core = new PeerCore(ctx)
+  const handlers = captureCommands(core)
+  await handlers.peer({ agent: { id: SELF }, rawInput: 'connect Peer session', signal: undefined })
+  assert.ok(core.store.between(SELF, PEER), 'the channel exists')
+
+  // The peer is archived: no longer addressable, but the channel is still here.
+  ctx.workspaceRegistry.archivedSessionIds = [PEER]
+  const revoked = await handlers.peer({ agent: { id: SELF }, rawInput: 'revoke Peer', signal: undefined })
+  assert.match(revoked.text, /revoked|断开/)
+  assert.equal(core.store.between(SELF, PEER), undefined, 'the channel is gone')
 })
 
 test('an unknown inbox id says so, and names the ids that exist', async () => {
