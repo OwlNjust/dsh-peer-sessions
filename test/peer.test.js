@@ -283,6 +283,34 @@ test('a peer message carries relay provenance and an attributable sender', () =>
   assert.notEqual(message.source.kind, 'user')
 })
 
+// The delivered body must not describe the grant differently from the card the
+// human approved. This drifted once: `once` was redefined as one EXCHANGE while
+// the body still said "single delivery".
+test('the delivered body agrees with the consent card about the tier', () => {
+  const once = buildPeerMessage({
+    senderId: SELF,
+    senderLabel: 'Backend',
+    tier: 'once',
+    channelId: 'pc-1',
+    kind: 'request',
+    summary: 'x',
+  })
+  const onceText = once.content[0].text
+  assert.match(onceText, /one exchange/)
+  assert.doesNotMatch(onceText, /single delivery/)
+  assert.doesNotMatch(onceText, /one delivery/)
+
+  const session = buildPeerMessage({
+    senderId: SELF,
+    senderLabel: 'Backend',
+    tier: 'session',
+    channelId: 'pc-1',
+    kind: 'notice',
+    summary: 'x',
+  })
+  assert.match(session.content[0].text, /this conversation/)
+})
+
 test('building a peer message without a sender throws rather than degrading', () => {
   assert.throws(
     () => buildPeerMessage({ senderId: '', senderLabel: 'x', tier: 'once', channelId: 'c', kind: 'notice', summary: 's' }),
