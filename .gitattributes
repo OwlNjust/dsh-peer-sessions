@@ -1,0 +1,16 @@
+# Keep every published file LF, whatever editor touches it.
+#
+# This repository is created and committed from WSL, where everything is already
+# LF, and it ships shell scripts — a CRLF in a shebang breaks them on Linux. The
+# concrete risk is someone editing through the Windows side (Notepad, Windows VS
+# Code) over a \\wsl.localhost path, which introduces CRLF silently. Pinning it
+# here makes that impossible rather than merely unlikely.
+#
+# NOT covered here, and worth knowing: the executable bit. Git has no attribute
+# for file mode, so install.sh, uninstall.sh, and scripts/link-deps.sh depend on
+# `core.fileMode=true` (true in WSL, frequently false on Windows). After editing
+# from the Windows side, confirm with:
+#
+#     git ls-files -s install.sh      # must print 100755
+#
+* text=auto eol=lf
