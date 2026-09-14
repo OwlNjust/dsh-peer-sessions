@@ -582,3 +582,39 @@ test('the plugin entry declares its services and wires both halves in apply()', 
   assert.deepEqual(injectedDeps, ['commands'])
   assert.deepEqual(registered.sort(), ['/peer', '/peers', 'peer_inbox', 'peer_list', 'peer_progress', 'peer_send'])
 })
+
+// The loader re-applies a plugin on file change WITHOUT re-evaluating the
+// module, so `apply()` runs again against the same module instance. A store
+// built inside apply() would be discarded there, silently dropping every open
+// channel. Observed live, so it is pinned here.
+test('open channels survive the plugin being re-applied', async () => {
+  const plugin = (await import('../lib/index.js')).default
+
+  const harness = () => {
+    const ctx = fakeCtx({
+      items: [summary(SELF), summary(PEER)],
+      agentIds: [SELF, PEER],
+      consent: 'Allow for this conversation',
+    })
+    const tools = new Map()
+    ctx.tools = { register: (definition) => (tools.set(definition.name, definition), () => {}) }
+    ctx.inject = (_deps, callback) => callback({ commands: { register: () => () => {} } })
+    plugin.apply(ctx)
+    const call = (name, args) =>
+      tools.get(name).execute(args, {
+        agent: ctx.agents.get(SELF),
+        signal: new AbortController().signal,
+        deferContext() {},
+      })
+    return { ctx, call }
+  }
+
+  const first = harness()
+  await first.call('peer_send', { peer: 'Peer', kind: 'notice', summary: 'channel opener' })
+  assert.equal(first.ctx.received.length, 1)
+
+  // A fresh apply(): same process, same module instance, brand-new apply call.
+  const second = harness()
+  const listing = await second.call('peer_list', {})
+  assert.match(listing, /Peer channels \(1\)/, 'the channel must outlive a re-apply')
+})
