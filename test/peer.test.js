@@ -84,11 +84,12 @@ function fakeAgent(id, received) {
 /**
  * A minimal host context: exactly the surface the plugin touches.
  *
- * `grant` and `wake` are OPTION INDICES the fake human picks (or null for "no
- * answerer"). They are indices rather than labels because a real UI echoes back
- * the label it was shown, whatever language that was — a fake that returned a
- * hard-coded English string would silently stop matching once the plugin asks
- * in another language, which is precisely how this was found.
+ * `grant` is the OPTION INDEX the fake human picks (or null for "no answerer").
+ * It is an index rather than a label because a real UI echoes back the label it
+ * was shown, whatever language that was — a fake returning a hard-coded English
+ * string would silently stop matching once the plugin asked in another language,
+ * which is precisely how this was found. There is exactly one question now, so
+ * a test that counts `asked` catches any regression to two cards.
  *
  * `locale` seeds the Host settings document the plugin reads its language from.
  */
@@ -97,8 +98,8 @@ function fakeCtx({
   archived = [],
   agentIds = [],
   grant = null,
-  wake = null,
   locale,
+  revive = false,
   resolved = undefined,
 }) {
   const received = []
@@ -108,6 +109,8 @@ function fakeCtx({
   return {
     received,
     asked,
+    /** Make a live agent cold again, the way an idle conversation becomes cold. */
+    drop: (id) => agents.delete(id),
     agents: {
       get: (id) => agents.get(id),
       roots: () => [...agents.values()],
@@ -133,16 +136,23 @@ function fakeCtx({
       list: async () => ({ items }),
       resolveAgent: async (id) => {
         if (resolved !== undefined) return resolved
-        const agent = agents.get(id)
-        return agent === undefined ? { error: { code: 'session/not-found' } } : { agent }
+        const existing = agents.get(id)
+        if (existing !== undefined) return { agent: existing }
+        // `revive` models a cold conversation the controller can resume: it is
+        // absent from the live registry until resolved, which is exactly the
+        // case that decides `willWake`.
+        if (!revive) return { error: { code: 'session/not-found' } }
+        const created = fakeAgent(id, received)
+        agents.set(id, created)
+        return { agent: created }
       },
     },
     userQuestions: {
       ask: async (request) => {
         asked.push(request)
         const question = request.questions[0]
-        const index = question.id === 'wake' ? wake : grant
-        if (index === null) throw new Error('no answerer')
+        if (grant === null) throw new Error('no answerer')
+        const index = grant
         const option = question.options[index]
         assert.ok(option, `question "${question.id}" has no option ${index}`)
         // Echo the offered label, exactly as a UI does.
@@ -612,37 +622,17 @@ test('a reply cannot unlock the grant by naming its own request', async () => {
   assert.equal(ctx.asked.length, 2)
 })
 
-test('a cold peer is not woken when the human declines the wake prompt', async () => {
+// One card covers the whole decision. Idle conversations are cold in this
+// deployment, so a separate "wake it?" prompt after every grant was friction
+// against a fact, not safety: the grant states the wake and covers it.
+test('a cold peer raises exactly ONE card, and that card states the wake', async () => {
   const ctx = fakeCtx({
     items: [summary(SELF), summary(PEER, { running: false })],
-    agentIds: [SELF], // the peer exists in the sidebar but has no live agent
-    grant: 0,
-    wake: 1,
-  })
-  const core = new PeerCore(ctx)
-  const result = await core.deliver({
-    selfAgent: ctx.agents.get(SELF),
-    selfLabel: 'Me',
-    peerEntry: { sessionId: PEER, label: 'Peer', running: false, projections: {} },
-    payload: { kind: 'notice', summary: 'hi' },
-  })
-  assert.equal(result.outcome, 'target-not-running')
-  assert.equal(ctx.received.length, 0)
-  // A declined wake must NOT burn the grant: the channel survives for the next
-  // attempt instead of a `once` grant being spent on nothing.
-  assert.equal(core.store.between(SELF, PEER).remaining, 1)
-  assert.equal(ctx.asked.length, 2, 'a cold peer with no channel raises the grant, then the wake question')
-  assert.equal(ctx.asked[1].questions[0].id, 'wake')
-})
-
-test('a cold peer is woken and delivered to once both prompts are approved', async () => {
-  const ctx = fakeCtx({
-    items: [summary(SELF), summary(PEER, { running: false })],
-    agentIds: [SELF, PEER],
+    agentIds: [SELF], // PEER is cold; the controller can still resume it
+    revive: true,
     grant: 1,
-    wake: 0,
   })
-  const core = new PeerCore(ctx)
+  const core = new PeerCore(ctx, undefined, translator('en'))
   const result = await core.deliver({
     selfAgent: ctx.agents.get(SELF),
     selfLabel: 'Me',
@@ -650,8 +640,70 @@ test('a cold peer is woken and delivered to once both prompts are approved', asy
     payload: { kind: 'notice', summary: 'hi' },
   })
   assert.equal(result.outcome, 'delivered')
-  assert.equal(ctx.received.length, 1)
+  assert.equal(ctx.asked.length, 1, 'a cold peer must not raise a second card')
+  assert.match(ctx.asked[0].questions[0].detail, /is not running right now/)
+  assert.match(ctx.asked[0].questions[0].detail, /wakes it/)
   assert.equal(ctx.received[0].via, 'followup')
+})
+
+test('a running peer raises a card that stays silent about waking', async () => {
+  const ctx = fakeCtx({ items: [summary(SELF), summary(PEER)], agentIds: [SELF, PEER], grant: 1 })
+  const core = new PeerCore(ctx, undefined, translator('en'))
+  await core.deliver({
+    selfAgent: ctx.agents.get(SELF),
+    selfLabel: 'Me',
+    peerEntry: { sessionId: PEER, label: 'Peer', running: true, projections: {} },
+    payload: { kind: 'notice', summary: 'hi' },
+  })
+  assert.equal(ctx.asked.length, 1)
+  assert.doesNotMatch(ctx.asked[0].questions[0].detail, /wakes it/)
+})
+
+test('a later delivery on an open channel wakes the peer with no card at all', async () => {
+  const ctx = fakeCtx({
+    items: [summary(SELF), summary(PEER, { running: false })],
+    agentIds: [SELF],
+    revive: true,
+    grant: 1,
+  })
+  const core = new PeerCore(ctx, undefined, translator('en'))
+  const selfAgent = ctx.agents.get(SELF)
+  const peerEntry = { sessionId: PEER, label: 'Peer', running: false, projections: {} }
+  await core.deliver({ selfAgent, selfLabel: 'Me', peerEntry, payload: { kind: 'notice', summary: 'one' } })
+  assert.equal(ctx.agents.get(PEER) !== undefined, true, 'the first delivery woke it')
+  // The peer goes cold again between deliveries, as an idle conversation does.
+  // `deliver` reads `agents.get`, so this is the state that decides `willWake`.
+  ctx.drop(PEER)
+  const before = ctx.asked.length
+  const second = await core.deliver({
+    selfAgent,
+    selfLabel: 'Me',
+    peerEntry,
+    payload: { kind: 'notice', summary: 'two' },
+  })
+  assert.equal(second.outcome, 'delivered')
+  assert.equal(ctx.asked.length, before, 'the channel grant covers waking, so no second card')
+  assert.equal(ctx.received.length, 2)
+})
+
+test('a silent delivery to a cold peer is refused rather than waking it', async () => {
+  const ctx = fakeCtx({
+    items: [summary(SELF), summary(PEER, { running: false })],
+    agentIds: [SELF], // cold
+    revive: true, // and resumable — the refusal must come from the rule, not from a failure
+    grant: 1,
+  })
+  const core = new PeerCore(ctx, undefined, translator('en'))
+  const result = await core.deliver({
+    selfAgent: ctx.agents.get(SELF),
+    selfLabel: 'Me',
+    peerEntry: { sessionId: PEER, label: 'Peer', running: false, projections: {} },
+    payload: { kind: 'notice', summary: 'hi' },
+    silent: true,
+  })
+  assert.equal(result.outcome, 'silent-needs-running')
+  assert.equal(ctx.asked.length, 0, 'it must not even ask: the request is self-contradictory')
+  assert.equal(ctx.received.length, 0)
 })
 
 // --------------------------------------------------------- progress boundaries
@@ -831,11 +883,8 @@ test('both shipped locales cover every key the plugin asks for', () => {
     'consent.grant.once',
     'consent.grant.session',
     'consent.grant.decline',
-    'consent.wake.header',
-    'consent.wake.question',
-    'consent.wake.detail',
-    'consent.wake.yes',
-    'consent.wake.no',
+    'consent.grant.wakeNote',
+    'silent.needsRunning',
   ]) {
     // A missing key returns the key itself, which would surface as raw
     // identifiers in the palette or the consent card.
