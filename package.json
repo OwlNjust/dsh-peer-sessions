@@ -1,6 +1,6 @@
 {
   "name": "dsh-peer-sessions",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Peer session interop for DeepSeek Harness: symmetric, user-granted channels between conversations at the same level — no parent, no child.",
   "license": "MIT",
   "type": "module",
@@ -20,6 +20,9 @@
     "README.zh.md",
     "LICENSE"
   ],
+  "scripts": {
+    "test": "node --test"
+  },
   "keywords": [
     "deepseek",
     "dsh",

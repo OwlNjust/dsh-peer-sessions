@@ -70,6 +70,16 @@ const addressable = summaries.filter(s =>
 ## 安装
 
 ```sh
+./install.sh
+```
+
+它会做四件事：把本包的 `node_modules` 软链到 profile 的（这样 `@deepseek-ai/dsh-llm`
+和 `@deepseek-ai/dsh-tools` 才能解析，而且指向**与宿主同一份模块实例**）、加 profile 依赖、
+追加 composition 行、部署技能。
+
+手动安装：
+
+```sh
 cd ~/.dsh/profiles/web
 dsh plugin --profile web add link:/path/to/dsh-peer-sessions
 ```
@@ -82,16 +92,26 @@ dsh plugin --profile web add link:/path/to/dsh-peer-sessions
       name: dsh-peer-sessions
 ```
 
-复制技能（是**复制**，不是软链——技能提供者用 `lstat` 语义列举目录，
-软链的 skill 目录永远不会被发现）：
+复制技能——是**复制**不是软链，因为技能提供者用 `lstat` 语义列举技能根，
+软链的目录永远不会被发现：
 
 ```sh
 mkdir -p ~/.dsh/skills && cp -r skill/peer-session ~/.dsh/skills/
 ```
 
-重启 web profile。或者直接运行 `./install.sh`。
+重启 web profile，然后用 `/peers` 检查。
+
+## 开发
+
+```sh
+node --test      # 25 项测试，不需要 harness
+```
+
+测试跑真实的 `@deepseek-ai/dsh-llm` 消息构造 + 一个假宿主上下文，
+所以每条不变量都被覆盖，而不需要启动进程。
 
 ## 状态
 
-预发布。设计已冻结，实现从 M1 开始（见 [docs/design.md §13](docs/design.md)）。
-`lib/index.js` 尚未存在，`install.sh` 在它存在之前拒绝做任何接线。
+**M1 已实现**，等待真实双会话验收。里程碑划分与验收路径见
+[docs/design.md §13](docs/design.md)；实现期实测到的运行时事实见 §12——
+其中两条修正了设计初稿。

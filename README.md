@@ -74,6 +74,17 @@ through the existing user-questions UI, and message provenance through the exist
 ## Installation
 
 ```sh
+./install.sh
+```
+
+It does four things: links this package's `node_modules` to the profile's (so
+`@deepseek-ai/dsh-llm` and `@deepseek-ai/dsh-tools` resolve, on the **same module
+instances** the harness already loaded), adds the profile dependency, appends the
+composition row, and copies the skill.
+
+By hand instead:
+
+```sh
 cd ~/.dsh/profiles/web
 dsh plugin --profile web add link:/path/to/dsh-peer-sessions
 ```
@@ -86,17 +97,27 @@ Then append to `~/.dsh/profiles/web/cordis.patch.yml`:
       name: dsh-peer-sessions
 ```
 
-Copy the skill (a **copy**, not a symlink — the skill provider lists directories with
-`lstat` semantics, so a symlinked skill directory is never discovered):
+Copy the skill — a **copy**, not a symlink, because the skill provider lists
+skill roots with `lstat` semantics and a symlinked directory is never discovered:
 
 ```sh
 mkdir -p ~/.dsh/skills && cp -r skill/peer-session ~/.dsh/skills/
 ```
 
-Restart the web profile. Or just run `./install.sh`.
+Restart the web profile, then check with `/peers`.
+
+## Development
+
+```sh
+node --test      # 25 tests, no harness required
+```
+
+The tests exercise the real `@deepseek-ai/dsh-llm` message construction and a fake
+host context, so every invariant is covered without a running process.
 
 ## Status
 
-Pre-release. The design is frozen; implementation starts at M1 (see
-[docs/design.md §13](docs/design.md)). `lib/index.js` does not exist yet, and
-`install.sh` refuses to wire anything until it does.
+**M1 implemented**, awaiting a real two-conversation run. See
+[docs/design.md §13](docs/design.md) for the milestone breakdown and the
+acceptance walkthrough, and §12 for the runtime facts established while
+implementing — two of which corrected the draft design.

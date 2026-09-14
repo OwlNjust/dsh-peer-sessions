@@ -3,9 +3,18 @@
 #
 # Idempotent: re-run it safely after editing the skill or pulling new code.
 #
-# The skill is COPIED rather than symlinked on purpose. The skill provider lists
-# each skill root with lstat semantics (dsh-fs-local), so a symlinked directory
-# is classified as 'other' and the skill is never discovered.
+# Two things here are deliberate and easy to "fix" wrongly:
+#
+#   * The plugin's node_modules is a symlink to the profile's, because Node
+#     resolves a bare specifier from the importing file's REAL path. A `link:`
+#     install leaves this package outside the profile tree, so without the link
+#     its `@deepseek-ai/dsh-llm` / `@deepseek-ai/dsh-tools` imports do not
+#     resolve. Pointing at the profile also keeps it on the same module
+#     instances the harness already loaded, so there is no second copy.
+#
+#   * The skill is COPIED, never symlinked. The skill provider lists each skill
+#     root with lstat semantics (dsh-fs-local), so a symlinked directory is
+#     classified as 'other' and the skill is never discovered.
 #
 # Environment overrides:
 #   DSH_PROFILE   profile to install into            (default: web)
@@ -18,6 +27,7 @@ PROFILE="${DSH_PROFILE:-web}"
 DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
 PROFILE_DIR="${DSH_HOME}/profiles/${PROFILE}"
 PATCH_FILE="${PROFILE_DIR}/cordis.patch.yml"
+DEPLOY_NODE_MODULES="${DSH_HOME}/profiles/node_modules"
 ROW_ID="dsh-peer-sessions"
 SKILL_NAME="peer-session"
 SKILL_SRC="${REPO_DIR}/skill/${SKILL_NAME}"
@@ -34,7 +44,7 @@ say ""
 
 # ---------------------------------------------------------------- 0. preflight
 [ -f "${REPO_DIR}/lib/index.js" ] \
-  || fail "lib/index.js is missing — this package is still a skeleton (see docs/design.md, milestone M1). Refusing to wire a plugin that does not exist."
+  || fail "lib/index.js is missing — this package is still a skeleton. Refusing to wire a plugin that does not exist."
 
 [ -d "${PROFILE_DIR}" ] \
   || fail "profile directory not found: ${PROFILE_DIR} (set DSH_PROFILE to the profile you actually use)"
@@ -42,8 +52,22 @@ say ""
 [ -f "${PATCH_FILE}" ] \
   || fail "patch layer not found: ${PATCH_FILE}"
 
-# --------------------------------------------------- 1. profile dependency
-say "[1/3] profile dependency"
+[ -d "${DEPLOY_NODE_MODULES}" ] \
+  || fail "deployment packages not found: ${DEPLOY_NODE_MODULES}"
+
+# ------------------------------------------------ 1. module resolution link
+say "[1/4] module resolution  (${REPO_DIR}/node_modules)"
+if [ -e "${REPO_DIR}/node_modules" ] && [ ! -L "${REPO_DIR}/node_modules" ]; then
+  warn "${REPO_DIR}/node_modules exists and is not a symlink — leaving it alone."
+  warn "if imports fail, remove it and re-run this script."
+else
+  ln -sfn "${DEPLOY_NODE_MODULES}" "${REPO_DIR}/node_modules"
+  say "      -> ${DEPLOY_NODE_MODULES}"
+fi
+say ""
+
+# --------------------------------------------------- 2. profile dependency
+say "[2/4] profile dependency"
 if command -v dsh >/dev/null 2>&1; then
   # link: keeps the checkout live, so edits need no reinstall.
   ( cd "${PROFILE_DIR}" && dsh plugin --profile "${PROFILE}" add "link:${REPO_DIR}" )
@@ -58,8 +82,8 @@ else
 fi
 say ""
 
-# ------------------------------------------------------- 2. patch layer row
-say "[2/3] patch layer row  (${PATCH_FILE})"
+# ------------------------------------------------------- 3. patch layer row
+say "[3/4] patch layer row  (${PATCH_FILE})"
 if grep -q "${ROW_ID}" "${PATCH_FILE}"; then
   say "      already present — leaving it alone"
 else
@@ -77,8 +101,8 @@ else
 fi
 say ""
 
-# --------------------------------------------------------------- 3. skill
-say "[3/3] skill  (${SKILL_DST})"
+# --------------------------------------------------------------- 4. skill
+say "[4/4] skill  (${SKILL_DST})"
 [ -d "${SKILL_SRC}" ] || fail "skill source not found: ${SKILL_SRC}"
 mkdir -p "${DSH_HOME}/skills"
 # Replace the whole directory so removed files do not linger in the deployed copy.
@@ -89,6 +113,7 @@ say ""
 
 say "== done =="
 say "Restart the '${PROFILE}' profile for the host plugin to load."
+say "Verify afterwards with:  /peers"
 if [ "${DEP_MANUAL:-0}" = "1" ]; then
   fail "the profile dependency still has to be added by hand (see the warning above), then restart '${PROFILE}'."
 fi

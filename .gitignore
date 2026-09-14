@@ -1,3 +1,9 @@
+# A trailing slash matches DIRECTORIES only. install.sh creates `node_modules`
+# as a symlink to the profile's node_modules so this package's dsh imports
+# resolve on the same module instances the harness loaded — so the bare name is
+# required here, or the link would be committed.
+node_modules
 node_modules/
+
 *.log
 .DS_Store
