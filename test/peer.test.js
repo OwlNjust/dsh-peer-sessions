@@ -13,7 +13,17 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { classify, listAddressable, resolveTarget, labelOf, stripInvisible, displayToken } from '../lib/addressable.js'
-import { PeerStore, pairKey, CHANNEL_BUDGET, readMarker, stateLabel } from '../lib/store.js'
+import {
+  PeerStore,
+  pairKey,
+  CHANNEL_BUDGET,
+  HOP_LIMIT,
+  RATE_LIMIT,
+  RATE_WINDOW_MS,
+  readMarker,
+  stateLabel,
+  parseDuration,
+} from '../lib/store.js'
 import { buildPeerMessage, buildDeliveryNotice, PEER_KIND } from '../lib/messages.js'
 import { translator, resolveLocale, normalizeLocale, DEFAULT_LOCALE } from '../lib/i18n.js'
 import { isRuntimeRoot } from '../lib/consent.js'
@@ -430,6 +440,78 @@ test('every inbox status has its own label, not the fallback', () => {
     assert.notEqual(readMarker(status), undefined)
     if (status !== 'replied') assert.notEqual(stateLabel(status), status)
   }
+})
+
+// ------------------------------------------------------------- loop protection
+
+// `replyWithin` was prose until loop protection needed it: it was printed into
+// the delivered body and never interpreted, so a request could not time out and
+// B5 had nothing to fire on.
+test('parseDuration reads the units the tool description promises', () => {
+  assert.equal(parseDuration('15m'), 15 * 60_000)
+  assert.equal(parseDuration('4h'), 4 * 3_600_000)
+  assert.equal(parseDuration('90s'), 90_000)
+  assert.equal(parseDuration(' 2 h '), 2 * 3_600_000)
+  assert.equal(parseDuration('250ms'), 250)
+  // Unparseable input must NOT become a deadline: a request with no real
+  // deadline is honest, one with a made-up deadline is not.
+  assert.equal(parseDuration('soon'), undefined)
+  assert.equal(parseDuration(''), undefined)
+  assert.equal(parseDuration('0m'), undefined)
+  assert.equal(parseDuration(undefined), undefined)
+  assert.equal(parseDuration(42), undefined)
+})
+
+test('a hop chain deepens as peers answer each other, and stops at the limit', () => {
+  const store = new PeerStore()
+  // A fresh chain, sent on the user's own initiative.
+  assert.equal(store.nextHop('a'), 1)
+
+  // b is answering a message that carried hop 1, so its reply carries 2.
+  store.noteInboundHop('b', 1)
+  assert.equal(store.nextHop('b'), 2)
+  store.noteInboundHop('a', 2)
+  assert.equal(store.nextHop('a'), 3)
+  store.noteInboundHop('b', 3)
+  assert.equal(store.nextHop('b'), HOP_LIMIT + 1, 'the next hop is what the guard refuses')
+
+  // A stale mark is not an answer: past the memory window this is a new chain,
+  // not a continuation of something from twenty minutes ago.
+  store.noteInboundHop('c', HOP_LIMIT)
+  store.inboundHops.set('c', { hop: HOP_LIMIT, at: Date.now() - 16 * 60_000 })
+  assert.equal(store.nextHop('c'), 1)
+})
+
+test('the rate limit is a fixed window, and it resets', () => {
+  const store = new PeerStore()
+  const channel = store.open({ a: 'a', b: 'b', tier: 'session', by: 'a' })
+  const start = 1_000_000
+  for (let i = 0; i < RATE_LIMIT; i += 1) {
+    assert.equal(store.withinRate(channel, start), true, `delivery ${i + 1} is within the limit`)
+  }
+  assert.equal(store.withinRate(channel, start), false, 'one past the limit is refused')
+  assert.equal(store.withinRate(channel, start + RATE_WINDOW_MS - 1), false, 'still inside the window')
+  assert.equal(store.withinRate(channel, start + RATE_WINDOW_MS), true, 'a new window starts over')
+})
+
+test('an overdue request is reported once, and a deadline-less one never', () => {
+  const store = new PeerStore()
+  const now = 5_000_000
+  store.notePending({ requestId: 'req-due', from: 'a', to: 'b', dueAt: now - 1 })
+  store.notePending({ requestId: 'req-later', from: 'a', to: 'b', dueAt: now + 60_000 })
+  store.notePending({ requestId: 'req-forever', from: 'a', to: 'b', dueAt: Number.POSITIVE_INFINITY })
+
+  assert.equal(store.isOverdue('req-due', now), true)
+  assert.equal(store.isOverdue('req-later', now), false)
+
+  const first = store.overdueRequests('a', now)
+  assert.deepEqual(first.map((r) => r.requestId), ['req-due'])
+  assert.deepEqual(store.overdueRequests('a', now), [], 'reported once, not on every call')
+  assert.deepEqual(store.overdueRequests('b', now), [], 'only the waiting side is told')
+
+  assert.deepEqual(store.pendingFor('a').map((r) => r.requestId), ['req-due', 'req-later', 'req-forever'])
+  assert.equal(store.clearPending('req-due'), true)
+  assert.equal(store.isOverdue('req-due', now), false, 'an answer retires the deadline')
 })
 
 test('revoke removes the channel and replies mark an inbound request answered', () => {
@@ -1109,6 +1191,111 @@ test('every command definition registers with a name and a handler', () => {
     core,
   )
   assert.deepEqual(names, ['peers', 'peer'])
+})
+
+// ------------------------------------------------- loop protection (delivery)
+
+test('a delivery carries a hop, and the chain is refused past the limit', async () => {
+  const ctx = fakeCtx({ items: [summary(SELF), summary(PEER)], agentIds: [SELF, PEER], grant: 1 })
+  const core = new PeerCore(ctx)
+  const entry = (id, label) => ({ sessionId: id, label, running: true, projections: {} })
+
+  // Turn by turn: A opens, B answers, A answers back, B answers again. The
+  // fourth transmission is hop 4, one past the cap, and must be refused — so
+  // the test expects that call to throw instead of growing the list.
+  const order = [[SELF, PEER], [PEER, SELF], [SELF, PEER], [PEER, SELF]]
+  const hops = []
+  for (let i = 0; i < order.length; i += 1) {
+    const [from, to] = order[i]
+    const payload = i === 0 ? { kind: 'request', summary: 'hop 1', requestId: 'req-chain' } : { kind: 'reply', summary: `hop ${i + 1}`, replyTo: 'req-chain' }
+    const send = () =>
+      core.deliver({
+        selfAgent: ctx.agents.get(from),
+        selfLabel: from,
+        peerEntry: entry(to, to),
+        payload,
+      })
+    if (i < HOP_LIMIT) {
+      const result = await send()
+      hops.push(result.hop)
+    } else {
+      await assert.rejects(
+        send,
+        // Locale-agnostic: the copy follows the client language, so match either.
+        (error) => error instanceof PeerRefusal && /hop|跳/.test(error.message),
+        'a chain beyond the cap is refused rather than delivered',
+      )
+    }
+  }
+  assert.deepEqual(hops, [1, 2, 3], 'each answer deepens the chain by one')
+})
+
+test('the delivery rate limit refuses without spending the budget', async () => {
+  // `session` tier on purpose: the rate window lives on the CHANNEL, and a
+  // `once` grant that runs out is revoked and reopened, which would hand every
+  // delivery a brand-new window and make the limit unreachable. That is what an
+  // earlier draft of this test actually measured.
+  const ctx = fakeCtx({ items: [summary(SELF), summary(PEER)], agentIds: [SELF, PEER], grant: 1 })
+  const core = new PeerCore(ctx)
+  const peerEntry = { sessionId: PEER, label: 'Peer', running: true, projections: {} }
+  const selfAgent = ctx.agents.get(SELF)
+  const send = () => core.deliver({ selfAgent, selfLabel: 'Me', peerEntry, payload: { kind: 'notice', summary: 'x' } })
+
+  const channel = (await send()).channel
+  const before = channel.remaining
+  assert.equal(channel.rateCount, 1, 'the opener counts once')
+
+  for (let i = channel.rateCount; i < RATE_LIMIT; i += 1) await send()
+  const atLimit = channel.rateCount
+  assert.equal(atLimit, RATE_LIMIT, 'the window is full')
+
+  await assert.rejects(
+    send,
+    // Locale-agnostic, same reason as the hop guard above.
+    (error) => error instanceof PeerRefusal && /rate|速率/.test(error.message),
+  )
+  // The refused attempt still counts inside the window. That is deliberate: if
+  // it did not, a caller that retried past the limit would eventually be let
+  // through without the window having elapsed.
+  assert.equal(channel.rateCount, atLimit + 1, 'the refused attempt counts inside the window')
+  // `before` was read after the opener, so only the top-ups may have spent.
+  assert.equal(channel.remaining, before - (RATE_LIMIT - 1), 'but it must not consume quota')
+})
+
+test('a request is remembered as pending, and an answer retires it', async () => {
+  // The copy follows the client language, and the default is Simplified Chinese;
+  // this has to name a locale or it asserts English against Chinese output.
+  const ctx = fakeCtx({ items: [summary(SELF), summary(PEER)], agentIds: [SELF, PEER], grant: 1, locale: { preference: 'en' } })
+  const core = new PeerCore(ctx)
+  const entry = (id, label) => ({ sessionId: id, label, running: true, projections: {} })
+
+  await core.deliver({
+    selfAgent: ctx.agents.get(SELF),
+    selfLabel: 'Me',
+    peerEntry: entry(PEER, 'Peer'),
+    payload: { kind: 'request', summary: 'answer me', requestId: 'req-1', replyWithin: '5ms' },
+  })
+
+  // Now it is really overdue: a real clock, a real deadline. `pendingReports`
+  // is read-only, so nothing else in the suite is disturbed by this.
+  await new Promise((resolve) => setTimeout(resolve, 12))
+  const text = core.pendingReports(SELF).join('\n')
+  // Locale-agnostic: the copy follows the client language, and this core was
+  // built without a locale, so it speaks the default. What matters is that the
+  // one overdue request is named, once.
+  assert.match(text, /req-1/)
+  assert.match(text, /1/)
+  assert.doesNotMatch(text, /\{count\}/, 'the count must be interpolated, not left as a placeholder')
+  assert.deepEqual(core.pendingReports(SELF), [], 'announced once, never repeated')
+
+  const answered = await core.deliver({
+    selfAgent: ctx.agents.get(PEER),
+    selfLabel: 'Peer',
+    peerEntry: entry(SELF, 'Me'),
+    payload: { kind: 'reply', summary: 'here', replyTo: 'req-1' },
+  })
+  assert.equal(core.noteReply(PEER, 'req-1', answered.channel), true)
+  assert.deepEqual(core.store.pendingFor(SELF), [], 'an answer retires the deadline')
 })
 
 // -------------------------------------------------------------- plugin entry
