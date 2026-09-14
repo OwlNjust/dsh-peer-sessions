@@ -66,7 +66,7 @@ const addressable = summaries.filter(s =>
 | 工具 | 作用 |
 |---|---|
 | `peer_send` | 发消息；无授权时弹出授权卡片 |
-| `peer_inbox` | 读收件箱 |
+| `peer_inbox` | 读收件箱：每条一行摘要，或按 id 取回某条的完整投递正文 |
 | `peer_progress` | 读对端投影 + 摘要 |
 | `peer_list` | 查看通道与权限 |
 

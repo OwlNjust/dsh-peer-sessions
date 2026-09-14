@@ -75,7 +75,7 @@ Read it before changing anything.
 | Tool | Effect |
 |---|---|
 | `peer_send` | Send a message; without a grant this raises the consent card |
-| `peer_inbox` | Read the inbox |
+| `peer_inbox` | Read the inbox: one summary line per item, or the full delivered text of one item by id |
 | `peer_progress` | Read a peer's projection + summary |
 | `peer_list` | Inspect channels and permissions |
 
