@@ -1,10 +1,18 @@
 {
   "name": "dsh-peer-sessions",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Peer session interop for DeepSeek Harness: symmetric, user-granted channels between conversations at the same level — no parent, no child.",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OwlNjust/dsh-peer-sessions.git"
+  },
+  "bugs": {
+    "url": "https://github.com/OwlNjust/dsh-peer-sessions/issues"
+  },
+  "homepage": "https://github.com/OwlNjust/dsh-peer-sessions#readme",
   "exports": {
     ".": {
       "default": "./lib/index.js"
@@ -16,7 +24,10 @@
     "lib",
     "skill",
     "scripts",
+    "docs",
     "cordis.patch.yml",
+    "install.sh",
+    "uninstall.sh",
     "MAINTENANCE.md",
     "README.md",
     "README.zh.md",

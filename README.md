@@ -83,6 +83,23 @@ Read it before changing anything.
 through the existing user-questions UI, and message provenance through the existing
 `form: 'relay'` rendering. This package declares no `dsh.client`.
 
+## Loop protection
+
+Two conversations answering each other can go on indefinitely, so there are three
+ceilings and one timeout notice. All of them are decided BEFORE a delivery happens — a
+refused delivery spends no quota and does not advance the chain.
+
+| Guard | Limit | Meaning |
+|---|---|---|
+| Rate per pair | 30 / 60s | Fixed window, held on the channel |
+| Total per pair | 200 | Lifetime deliveries on one channel (`once` buys 1) |
+| Hop count | 3 | Depth of a causal chain being RELAYED across conversations; two peers chatting normally are not affected |
+| Request timeout | `replyWithin` | Announces once on the asking side, and **never resends** |
+
+`replyWithin` on a `request` (e.g. `"15m"`, `"4h"`) is a real deadline: when it passes, the
+asking side sees an `Overdue` notice on its next tool call, the receiving side sees
+`[timed out · …]` in its listing, and fetching that body adds a `deadline: OVERDUE` line.
+
 ## Installation
 
 ```sh
