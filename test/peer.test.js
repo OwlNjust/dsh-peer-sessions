@@ -15,6 +15,7 @@ import assert from 'node:assert/strict'
 import { classify, listAddressable, resolveTarget, labelOf } from '../lib/addressable.js'
 import { PeerStore, pairKey, CHANNEL_BUDGET } from '../lib/store.js'
 import { buildPeerMessage, buildDeliveryNotice, PEER_KIND } from '../lib/messages.js'
+import { translator, resolveLocale, normalizeLocale, DEFAULT_LOCALE } from '../lib/i18n.js'
 import { isRuntimeRoot } from '../lib/consent.js'
 import { PeerCore, PeerRefusal } from '../lib/core.js'
 import { registerTools } from '../lib/tools.js'
@@ -58,15 +59,27 @@ function fakeAgent(id, received) {
 /**
  * A minimal host context: exactly the surface the plugin touches.
  *
- * `consent` answers the grant question; `wake` answers the cold-peer wake
- * question. They are separate because a cold peer with no channel raises BOTH
- * (may we talk at all, then may we spend tokens resuming it), and a fake that
- * conflated them would hide that ordering.
+ * `grant` and `wake` are OPTION INDICES the fake human picks (or null for "no
+ * answerer"). They are indices rather than labels because a real UI echoes back
+ * the label it was shown, whatever language that was — a fake that returned a
+ * hard-coded English string would silently stop matching once the plugin asks
+ * in another language, which is precisely how this was found.
+ *
+ * `locale` seeds the Host settings document the plugin reads its language from.
  */
-function fakeCtx({ items, archived = [], agentIds = [], consent = null, wake = null, resolved = undefined }) {
+function fakeCtx({
+  items,
+  archived = [],
+  agentIds = [],
+  grant = null,
+  wake = null,
+  locale,
+  resolved = undefined,
+}) {
   const received = []
   const agents = new Map(agentIds.map((id) => [id, fakeAgent(id, received)]))
   const asked = []
+  const listeners = new Map()
   return {
     received,
     asked,
@@ -77,6 +90,20 @@ function fakeCtx({ items, archived = [], agentIds = [], consent = null, wake = n
     sessions: { get: () => undefined },
     sessionTitle: { get: () => undefined },
     workspaceRegistry: { archivedSessionIds: archived },
+    settings: { get: (ns) => (ns === 'locale' ? locale : undefined) },
+    get(name) {
+      if (name === 'settings') return this.settings
+      return undefined
+    },
+    on(event, listener) {
+      const list = listeners.get(event) ?? []
+      list.push(listener)
+      listeners.set(event, list)
+      return () => {}
+    },
+    emit(event, ...args) {
+      for (const listener of listeners.get(event) ?? []) listener(...args)
+    },
     sessionController: {
       list: async () => ({ items }),
       resolveAgent: async (id) => {
@@ -88,10 +115,13 @@ function fakeCtx({ items, archived = [], agentIds = [], consent = null, wake = n
     userQuestions: {
       ask: async (request) => {
         asked.push(request)
-        const id = request.questions[0].id
-        const answer = id === 'wake' ? wake : consent
-        if (answer === null) throw new Error('no answerer')
-        return { answers: [{ id, selected: [answer] }] }
+        const question = request.questions[0]
+        const index = question.id === 'wake' ? wake : grant
+        if (index === null) throw new Error('no answerer')
+        const option = question.options[index]
+        assert.ok(option, `question "${question.id}" has no option ${index}`)
+        // Echo the offered label, exactly as a UI does.
+        return { answers: [{ id: question.id, selected: [option.label] }] }
       },
     },
   }
@@ -305,7 +335,7 @@ test('deliver sends nothing when the human declines', async () => {
   const ctx = fakeCtx({
     items: [summary(SELF), summary(PEER)],
     agentIds: [SELF, PEER],
-    consent: 'Decline',
+    grant: 2,
   })
   const core = new PeerCore(ctx)
   const result = await core.deliver({
@@ -323,7 +353,7 @@ test('deliver queues through followup (never steer) once the human consents', as
   const ctx = fakeCtx({
     items: [summary(SELF), summary(PEER)],
     agentIds: [SELF, PEER],
-    consent: 'Allow for this conversation',
+    grant: 1,
   })
   const core = new PeerCore(ctx)
   const result = await core.deliver({
@@ -344,7 +374,7 @@ test('a silent delivery uses inject so the peer is not woken', async () => {
   const ctx = fakeCtx({
     items: [summary(SELF), summary(PEER)],
     agentIds: [SELF, PEER],
-    consent: 'Allow once',
+    grant: 0,
   })
   const core = new PeerCore(ctx)
   const result = await core.deliver({
@@ -362,7 +392,7 @@ test('a second delivery reuses the granted channel without asking again', async 
   const ctx = fakeCtx({
     items: [summary(SELF), summary(PEER)],
     agentIds: [SELF, PEER],
-    consent: 'Allow for this conversation',
+    grant: 1,
   })
   const core = new PeerCore(ctx)
   const peerEntry = { sessionId: PEER, label: 'Peer', running: true, projections: {} }
@@ -380,7 +410,7 @@ test('a once grant buys one exchange: the answer rides the same approval', async
   const ctx = fakeCtx({
     items: [summary(SELF), summary(PEER)],
     agentIds: [SELF, PEER],
-    consent: 'Allow once',
+    grant: 0,
   })
   const core = new PeerCore(ctx)
   const selfAgent = ctx.agents.get(SELF)
@@ -412,7 +442,7 @@ test('a once grant does not carry an unrelated second message', async () => {
   const ctx = fakeCtx({
     items: [summary(SELF), summary(PEER)],
     agentIds: [SELF, PEER],
-    consent: 'Allow once',
+    grant: 0,
   })
   const core = new PeerCore(ctx)
   const peerEntry = { sessionId: PEER, label: 'Peer', running: true, projections: {} }
@@ -426,7 +456,7 @@ test('an unknown replyTo does not unlock a spent once grant', async () => {
   const ctx = fakeCtx({
     items: [summary(SELF), summary(PEER)],
     agentIds: [SELF, PEER],
-    consent: 'Allow once',
+    grant: 0,
   })
   const core = new PeerCore(ctx)
   const selfAgent = ctx.agents.get(SELF)
@@ -452,7 +482,7 @@ test('a reply cannot unlock the grant by naming its own request', async () => {
   const ctx = fakeCtx({
     items: [summary(SELF), summary(PEER)],
     agentIds: [SELF, PEER],
-    consent: 'Allow once',
+    grant: 0,
   })
   const core = new PeerCore(ctx)
   const selfAgent = ctx.agents.get(SELF)
@@ -477,8 +507,8 @@ test('a cold peer is not woken when the human declines the wake prompt', async (
   const ctx = fakeCtx({
     items: [summary(SELF), summary(PEER, { running: false })],
     agentIds: [SELF], // the peer exists in the sidebar but has no live agent
-    consent: 'Allow once',
-    wake: 'Cancel',
+    grant: 0,
+    wake: 1,
   })
   const core = new PeerCore(ctx)
   const result = await core.deliver({
@@ -500,8 +530,8 @@ test('a cold peer is woken and delivered to once both prompts are approved', asy
   const ctx = fakeCtx({
     items: [summary(SELF), summary(PEER, { running: false })],
     agentIds: [SELF, PEER],
-    consent: 'Allow for this conversation',
-    wake: 'Wake it and deliver',
+    grant: 1,
+    wake: 0,
   })
   const core = new PeerCore(ctx)
   const result = await core.deliver({
@@ -522,7 +552,7 @@ test('a cold peer is woken and delivered to once both prompts are approved', asy
 // to the types and unfaithful to the data.
 test('progress renders the real goal, todos, and turn outline shapes', () => {
   const ctx = fakeCtx({ items: [] })
-  const core = new PeerCore(ctx)
+  const core = new PeerCore(ctx, undefined, translator('en'))
   const lines = core.progress({
     sessionId: PEER,
     label: 'Peer',
@@ -559,7 +589,7 @@ test('progress renders the real goal, todos, and turn outline shapes', () => {
 
 test('progress treats null and wrong-shaped projections as absent', () => {
   const ctx = fakeCtx({ items: [] })
-  const core = new PeerCore(ctx)
+  const core = new PeerCore(ctx, undefined, translator('en'))
   const lines = core.progress({
     sessionId: PEER,
     label: 'Peer',
@@ -605,7 +635,7 @@ test('progress clips previews so a widened projection cannot become a transcript
 
 test('an unknown projection contributes its name but never its value', () => {
   const ctx = fakeCtx({ items: [] })
-  const core = new PeerCore(ctx)
+  const core = new PeerCore(ctx, undefined, translator('en'))
   const text = core
     .progress({
       sessionId: PEER,
@@ -617,6 +647,151 @@ test('an unknown projection contributes its name but never its value', () => {
     .join('\n')
   assert.match(text, /other projections present: mystery/)
   assert.doesNotMatch(text, /should not be printed/)
+})
+
+// ------------------------------------------------------------- localization
+
+test('normalizeLocale maps BCP 47 tags onto shipped locales', () => {
+  assert.equal(normalizeLocale('zh'), 'zh')
+  assert.equal(normalizeLocale('zh-CN'), 'zh')
+  assert.equal(normalizeLocale('zh_Hans'), 'zh')
+  assert.equal(normalizeLocale('en-US'), 'en')
+  assert.equal(normalizeLocale('EN'), 'en')
+  assert.equal(normalizeLocale('fr'), undefined)
+  assert.equal(normalizeLocale(''), undefined)
+  assert.equal(normalizeLocale(null), undefined)
+  assert.equal(normalizeLocale(42), undefined)
+})
+
+test('the locale comes from the Host settings document, defaulting to Chinese', () => {
+  assert.equal(resolveLocale(fakeCtx({ items: [], locale: { preference: 'en' } })), 'en')
+  assert.equal(resolveLocale(fakeCtx({ items: [], locale: { preference: 'zh-CN' } })), 'zh')
+  // An absent preference "delegates to the browser", which the Host cannot read,
+  // so the documented fallback applies — Simplified Chinese, by instruction.
+  assert.equal(resolveLocale(fakeCtx({ items: [] })), DEFAULT_LOCALE)
+  assert.equal(resolveLocale(fakeCtx({ items: [], locale: {} })), DEFAULT_LOCALE)
+  assert.equal(resolveLocale(fakeCtx({ items: [], locale: { preference: 'fr' } })), DEFAULT_LOCALE)
+})
+
+test('a settings provider that throws on read falls back instead of breaking', () => {
+  const ctx = fakeCtx({ items: [] })
+  ctx.get = () => {
+    throw new Error('settings exploded')
+  }
+  assert.equal(resolveLocale(ctx), DEFAULT_LOCALE)
+})
+
+test('both shipped locales cover every key the plugin asks for', () => {
+  const en = translator('en')
+  const zh = translator('zh')
+  for (const key of [
+    'cmd.peers.desc',
+    'cmd.peer.desc',
+    'cmd.peer.hint',
+    'channel.none',
+    'channel.header',
+    'channel.line',
+    'channel.revokeHintLine',
+    'usage.peer',
+    'usage.connect',
+    'usage.revoke',
+    'usage.progress',
+    'peer.unknownSub',
+    'connect.already',
+    'connect.declined',
+    'connect.ok',
+    'revoke.none',
+    'revoke.done',
+    'resolve.many',
+    'resolve.noneWithCandidates',
+    'resolve.noneAlone',
+    'resolve.selfNotVisible',
+    'resolve.peerNotVisible',
+    'budget.spent',
+    'progress.conversation',
+    'progress.projected',
+    'progress.goal',
+    'progress.todos',
+    'progress.queued',
+    'progress.turns',
+    'progress.turn',
+    'progress.other',
+    'consent.grant.header',
+    'consent.grant.question',
+    'consent.grant.detail',
+    'consent.grant.once',
+    'consent.grant.session',
+    'consent.grant.decline',
+    'consent.wake.header',
+    'consent.wake.question',
+    'consent.wake.detail',
+    'consent.wake.yes',
+    'consent.wake.no',
+  ]) {
+    // A missing key returns the key itself, which would surface as raw
+    // identifiers in the palette or the consent card.
+    assert.notEqual(en(key), key, `en is missing ${key}`)
+    assert.notEqual(zh(key), key, `zh is missing ${key}`)
+    assert.notEqual(en(key), '', `en ${key} is empty`)
+    assert.notEqual(zh(key), '', `zh ${key} is empty`)
+  }
+  assert.match(zh('consent.grant.question', { peer: 'X' }), /X/)
+  assert.match(en('consent.grant.question', { peer: 'X' }), /X/)
+})
+
+test('the consent card is asked in the client language and still maps back', async () => {
+  // The question names the peer by the label resolved from the VISIBLE set, not
+  // by whatever the caller passed, so give the fake peer a real title.
+  const titled = (id, title) => summary(id, { projections: { asOfSeq: 0, values: { title } } })
+
+  const zh = fakeCtx({ items: [titled(SELF, '本对话'), titled(PEER, '对端')], agentIds: [SELF, PEER], grant: 1 })
+  const zhCore = new PeerCore(zh, undefined, translator('zh'))
+  await zhCore.deliver({
+    selfAgent: zh.agents.get(SELF),
+    selfLabel: '本对话',
+    peerEntry: { sessionId: PEER, label: '对端', running: true, projections: {} },
+    payload: { kind: 'notice', summary: 'hi' },
+  })
+  const zhQuestion = zh.asked[0].questions[0]
+  assert.equal(zhQuestion.header, '平级会话通道')
+  assert.match(zhQuestion.question, /对端/)
+  assert.deepEqual(
+    zhQuestion.options.map((option) => option.label),
+    ['仅这一次', '本对话内允许', '拒绝'],
+  )
+  // Labels are echoed by the UI, so a localized label must still resolve to the
+  // tier the human actually picked.
+  assert.equal(zhCore.store.between(SELF, PEER).tier, 'session')
+
+  const en = fakeCtx({ items: [titled(SELF, 'This one'), titled(PEER, 'Peer')], agentIds: [SELF, PEER], grant: 0 })
+  const enCore = new PeerCore(en, undefined, translator('en'))
+  await enCore.deliver({
+    selfAgent: en.agents.get(SELF),
+    selfLabel: 'This conversation',
+    peerEntry: { sessionId: PEER, label: 'Peer', running: true, projections: {} },
+    payload: { kind: 'notice', summary: 'hi' },
+  })
+  assert.equal(en.asked[0].questions[0].header, 'Peer session channel')
+  assert.equal(enCore.store.between(SELF, PEER).tier, 'once')
+})
+
+test('progress copy follows the translator', () => {
+  const entry = {
+    sessionId: PEER,
+    label: '对端',
+    running: true,
+    updatedAt: 1_700_000_000_000,
+    projections: { todos: [{ content: '写路由', status: 'in_progress' }] },
+  }
+  const ctx = fakeCtx({ items: [] })
+  const zhText = new PeerCore(ctx, undefined, translator('zh')).progress(entry).join('\n')
+  assert.match(zhText, /会话：\s+「对端」/)
+  assert.match(zhText, /状态：\s+运行中/)
+  assert.match(zhText, /待办：1 项中完成 0 项 · 进行中：写路由/)
+  const enText = new PeerCore(ctx, undefined, translator('en')).progress(entry).join('\n')
+  assert.match(enText, /conversation: "对端"/)
+  assert.match(enText, /state:\s+running/)
+  assert.match(enText, /todos: 0 of 1 complete · now: 写路由/)
 })
 
 // ------------------------------------------------- registration smoke checks
@@ -694,7 +869,7 @@ test('open channels survive the plugin being re-applied', async () => {
     const ctx = fakeCtx({
       items: [summary(SELF), summary(PEER)],
       agentIds: [SELF, PEER],
-      consent: 'Allow for this conversation',
+      grant: 1,
     })
     const tools = new Map()
     ctx.tools = { register: (definition) => (tools.set(definition.name, definition), () => {}) }

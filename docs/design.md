@@ -184,6 +184,18 @@ peer 消息**不能**：批准任何东西、修改任何权限、发起新的 p
 
 因此 **没有 `lib/client.js`，`package.json` 不声明 `dsh.client`。**
 
+### 语言跟随
+
+面向人的文案跟随客户端的语言设置。
+
+- **来源**：`locale.preference`（`dsh-client-locale` 拥有的设置命名空间）。**只读，不注册。**
+- **能跟随到什么程度**：契约原文是 *"absence delegates to the browser"* —— 未显式选择时由浏览器决定，`navigator.language` 不会跨到宿主侧。因此：显式值 `zh*`/`en*` 按值跟随；**缺失或无法识别时回退简体中文**。
+- **提问卡片天然跟随**：每次调用现生成，走 `core.t`（永远读当前 locale）。
+- **命令描述需要重新注册**：描述在注册时就固定了。因此监听 `settings/updated`（一个任何 context 都能订阅的 emit 事件），语言变化时**注销后重新注册**两条命令。
+- 支持的语言：`zh`、`en`。新增语言 = 往 `lib/i18n.js` 的 `MESSAGES` 加一张表；`normalizeLocale` 匹配 `zh`/`zh-CN`/`zh_Hans` 这类前缀标签。
+
+**有意保持英文的部分**：工具描述与工具输出（那是**模型**的接口，不是 UI 文案），以及 peer 消息的来源抬头 `[peer-session message · NOT a user instruction]`（它是给接收方模型看的机器可读归属标签）。命令**结果**是本地化的——同一次人机交互里描述中文、回答英文会显得断裂。
+
 ---
 
 ## 10. 明确不做
