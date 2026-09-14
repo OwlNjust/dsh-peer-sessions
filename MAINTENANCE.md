@@ -33,7 +33,7 @@
 | `lib/store.js` | 通道、授权档位、额度、收件箱（**进程内**，见坑 1） |
 | `lib/commands.js` / `lib/tools.js` | 2 条命令 + 4 个工具 |
 | `lib/i18n.js` | zh/en 文案表、语言解析、插值 |
-| `test/peer.test.js` | 68 项测试（需要依赖链接，见第四节） |
+| `test/peer.test.js` | 69 项测试（需要依赖链接，见第四节） |
 | `skill/peer-session/SKILL.md` | 给**模型**看的说明书（安装时复制到 `$DSH_HOME/skills/`） |
 | `docs/design.md` | 权威需求规格 + 真机验证表（§12） |
 | `scripts/link-deps.sh` | 把本包 `node_modules` 链到 harness 部署 |
@@ -50,7 +50,7 @@
 
 ```sh
 npm run link     # 一次性，指向本机已安装的 harness
-npm test         # 68 项，不需要启动 harness
+npm test         # 69 项，不需要启动 harness
 ```
 
 **为什么没有 CI**：测试会 `import '@deepseek-ai/dsh-llm'`，用**真实的** `createUserMessage` 验证消息构造，而那个包来自本机已安装的 harness 部署。干净的 clone 里没有它，CI 跑不起来。
@@ -354,9 +354,15 @@ Windows 侧显示的"已修改"是视错觉——见坑 13。
 
 顺带一个语义细节：窗口内**被拒绝的尝试仍然计数**（`withinRate` 先计数再判断）。这是有意的——否则连拒几次之后窗口还没过就又能发了。
 
+**真机第一轮就抓到一个单元测试覆盖不到的边界**：`peer_inbox` 在**空收件箱**时提前 `return 'Peer inbox is empty.'`，而那一步跳过了"询问是否有超时请求"——**询问即消费**（`reported` 标记），于是那次唯一的超时通知被一个丢弃它的分支吃掉了。空收件箱恰恰是等待者最会去翻的时候。修法：把超时请求的收集**提到任何提前返回之前**。
+
+这条又一次印证第七节：**"状态被读取时就顺便被消费"这种设计，最容易被提前返回绕过，而单元测试的 fixture 里通常没有"空 + 有待报事项"这个组合。** 现在测试钉住了它（空收件箱也必须报出超时请求、且下次不再重复）。
+
+另外记一个**有意的取舍**：`peer_list` **不消费**超时通知。它是只读视图，且已用 `OVERDUE` 标注同一事实；在那里也弹通知会把同一件事说两遍。
+
 ### 一次改动的标准流程
 
-1. `npm run link` → `npm test`（68 项）
+1. `npm run link` → `npm test`（69 项）
 2. 任何涉及真机契约的改动 → **必须真机验一遍**：`./install.sh` + **重启 profile**（坑 1）
 3. 改了文案 → 同时补 `lib/i18n.js` 的 `zh` 与 `en`（有测试检查两张表的键完整性）
 4. 改了行为 → 更新 `docs/design.md` §12 的验证表

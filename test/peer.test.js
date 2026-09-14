@@ -1541,6 +1541,32 @@ test('reading an unanswered request keeps it marked as unanswered', async () => 
   )
 })
 
+// The live harness found this one: `peer_inbox` returned "Peer inbox is empty."
+// for an empty inbox BEFORE it ever asked about overdue requests — and asking is
+// what marks them reported, so the single announcement B5 promises was consumed
+// by a branch that dropped it. An empty inbox is exactly when a waiting user
+// wonders, so the two must not be mutually exclusive.
+test('an overdue request is announced even when the inbox is empty', async () => {
+  const { call, tools, ctx } = wirePlugin({ grant: 1 })
+
+  await tools.get('peer_send').execute(
+    { peer: PEER, kind: 'request', summary: 'answer me', replyWithin: '1ms' },
+    { agent: ctx.agents.get(SELF), signal: new AbortController().signal, deferContext() {} },
+  )
+  // `peer_send` announced nothing: the deadline had not passed yet.
+  await new Promise((resolve) => setTimeout(resolve, 12))
+
+  const empty = await call('peer_inbox', {})
+  assert.match(empty, /Peer inbox is empty/)
+  assert.match(empty, /req-1/, 'the overdue request is named by the same call')
+  assert.doesNotMatch(empty, /\{count\}|\{requestId\}/, 'placeholders must be interpolated')
+
+  // Announced once: the announcement was consumed by THAT call.
+  const again = await call('peer_inbox', {})
+  assert.match(again, /Peer inbox is empty/)
+  assert.doesNotMatch(again, /req-1/, 'not repeated on the next call')
+})
+
 test('an unknown inbox id says so, and names the ids that exist', async () => {
   const { call, ctx, tools } = wirePlugin({ grant: 0 })
   const empty = await call('peer_inbox', { id: 'pm-nope' })
