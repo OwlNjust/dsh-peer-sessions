@@ -1,0 +1,15 @@
+# dsh-peer-sessions composition rows.
+#
+# Installation (deepseek-harness web profile):
+#   cd ~/.dsh/profiles/web
+#   dsh plugin --profile web add link:/path/to/dsh-peer-sessions
+# then append the `insert` block below to ~/.dsh/profiles/web/cordis.patch.yml
+# (the profile's user patch layer), and restart the web profile.
+#
+# One row activates the host plugin: it registers the /peers /peer commands and
+# the peer_* model tools globally, so every conversation in the process gets
+# them. There is no client half — the commands render through the existing
+# chat UI and the consent cards through the existing user-questions UI.
+- insert:
+    - id: dsh-peer-sessions
+      name: dsh-peer-sessions

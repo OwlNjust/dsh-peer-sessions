@@ -1,0 +1,35 @@
+{
+  "name": "dsh-peer-sessions",
+  "version": "0.0.1",
+  "description": "Peer session interop for DeepSeek Harness: symmetric, user-granted channels between conversations at the same level — no parent, no child.",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "skill",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "deepseek",
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "session",
+    "peer",
+    "interop"
+  ],
+  "engines": {
+    "node": ">=20"
+  }
+}
