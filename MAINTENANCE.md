@@ -33,7 +33,7 @@
 | `lib/store.js` | 通道、授权档位、额度、收件箱（**进程内**，见坑 1） |
 | `lib/commands.js` / `lib/tools.js` | 2 条命令 + 4 个工具 |
 | `lib/i18n.js` | zh/en 文案表、语言解析、插值 |
-| `test/peer.test.js` | 69 项测试（需要依赖链接，见第四节） |
+| `test/peer.test.js` | 70 项测试（需要依赖链接，见第四节） |
 | `skill/peer-session/SKILL.md` | 给**模型**看的说明书（安装时复制到 `$DSH_HOME/skills/`） |
 | `docs/design.md` | 权威需求规格 + 真机验证表（§12） |
 | `scripts/link-deps.sh` | 把本包 `node_modules` 链到 harness 部署 |
@@ -50,7 +50,7 @@
 
 ```sh
 npm run link     # 一次性，指向本机已安装的 harness
-npm test         # 69 项，不需要启动 harness
+npm test         # 70 项，不需要启动 harness
 ```
 
 **为什么没有 CI**：测试会 `import '@deepseek-ai/dsh-llm'`，用**真实的** `createUserMessage` 验证消息构造，而那个包来自本机已安装的 harness 部署。干净的 clone 里没有它，CI 跑不起来。
@@ -362,7 +362,7 @@ Windows 侧显示的"已修改"是视错觉——见坑 13。
 
 ### 一次改动的标准流程
 
-1. `npm run link` → `npm test`（69 项）
+1. `npm run link` → `npm test`（70 项）
 2. 任何涉及真机契约的改动 → **必须真机验一遍**：`./install.sh` + **重启 profile**（坑 1）
 3. 改了文案 → 同时补 `lib/i18n.js` 的 `zh` 与 `en`（有测试检查两张表的键完整性）
 4. 改了行为 → 更新 `docs/design.md` §12 的验证表

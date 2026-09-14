@@ -1567,6 +1567,34 @@ test('an overdue request is announced even when the inbox is empty', async () =>
   assert.doesNotMatch(again, /req-1/, 'not repeated on the next call')
 })
 
+// A peer conversation reviewing real output pointed out that the listing showed
+// `timed out` while the retrieval header did not — missing exactly where a
+// reader who just opened the body would ask whether it had expired. The deadline
+// is a third axis, so it is its own line rather than something folded into
+// `state:`.
+test('the retrieval header states an overdue deadline on its own line', async () => {
+  const { call, ctx, tools } = wirePlugin({ grant: 1 })
+
+  // A deadline with enough room for the on-time fetch below: `1ms` would already
+  // be overdue by the time the first retrieval runs, so the negative case needs a
+  // window the test can actually beat.
+  await tools.get('peer_send').execute(
+    { peer: SELF, kind: 'request', summary: 'answer me', replyWithin: '1s' },
+    { agent: ctx.agents.get(PEER), signal: new AbortController().signal, deferContext() {} },
+  )
+  const messageId = /id: (\S+)/.exec(await call('peer_inbox', {}))[1]
+
+  // Before the deadline: no deadline line, because there is nothing to report.
+  const onTime = await call('peer_inbox', { id: messageId })
+  assert.doesNotMatch(onTime, /deadline:/)
+
+  await new Promise((resolve) => setTimeout(resolve, 1100))
+  const late = await call('peer_inbox', { id: messageId })
+  assert.match(late, /^deadline: OVERDUE$/m, 'the header reports the third axis')
+  // And it stays out of `state:`: one field must not conflate three facts.
+  assert.doesNotMatch(late, /state: [^\n]*OVERDUE/)
+})
+
 test('an unknown inbox id says so, and names the ids that exist', async () => {
   const { call, ctx, tools } = wirePlugin({ grant: 0 })
   const empty = await call('peer_inbox', { id: 'pm-nope' })
