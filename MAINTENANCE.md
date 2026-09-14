@@ -33,7 +33,7 @@
 | `lib/store.js` | 通道、授权档位、额度、收件箱（**进程内**，见坑 1） |
 | `lib/commands.js` / `lib/tools.js` | 2 条命令 + 4 个工具 |
 | `lib/i18n.js` | zh/en 文案表、语言解析、插值 |
-| `test/peer.test.js` | 60 项测试（需要依赖链接，见第四节） |
+| `test/peer.test.js` | 61 项测试（需要依赖链接，见第四节） |
 | `skill/peer-session/SKILL.md` | 给**模型**看的说明书（安装时复制到 `$DSH_HOME/skills/`） |
 | `docs/design.md` | 权威需求规格 + 真机验证表（§12） |
 | `scripts/link-deps.sh` | 把本包 `node_modules` 链到 harness 部署 |
@@ -50,7 +50,7 @@
 
 ```sh
 npm run link     # 一次性，指向本机已安装的 harness
-npm test         # 60 项，不需要启动 harness
+npm test         # 61 项，不需要启动 harness
 ```
 
 **为什么没有 CI**：测试会 `import '@deepseek-ai/dsh-llm'`，用**真实的** `createUserMessage` 验证消息构造，而那个包来自本机已安装的 harness 部署。干净的 clone 里没有它，CI 跑不起来。
@@ -277,13 +277,27 @@ Windows 侧显示的"已修改"是视错觉——见坑 13。
 
 用户选定语义：**取回正文才算已读**，列出摘要不算。落点是 `store.markRead`，只在 `peer_inbox` 的**按 id 分支**调用。
 
-**一处别拆掉的约束**：读没读过、有没有人回，是**两个正交事实却共用一个 `status` 字段**。所以"已读"不能把 `awaiting-reply` 写成 `read`——那会抹掉 B6 要的待回复标记。做法是 `unread → read`（不显示标记）、`awaiting-reply → new`（显示 `new · never answered`），并且 `markReplied` 也要接受 `new`，否则"读过但还没回"的请求会变成无法标记为已回。
+**一处别拆掉的约束**：读没读过、有没有人回，是**两个正交事实却共用一个 `status` 字段**。所以"已读"不能把"未答"写成 `read`——那会抹掉 B6 要的待回复标记。
+
+**状态词表**（唯一定义在 `docs/design.md` §13，改名前先看它）：
+
+| `status` | 含义 | 列表标记 |
+|---|---|---|
+| `unread` | 非 request 的入站消息，正文未取回 | `[unread]` |
+| `unread-unanswered` | request，正文未取回、也无人回 | `[unread]` |
+| `read-unanswered` | request，正文已取回、仍无人回 | `[read · never answered]` |
+| `replied` | **我回复过**它（只出现在回信方这一端） | 无标记 |
+
+两个真机教我的坑，都在这一项里：
+
+- **标签不能与状态矛盾**：`read-unanswered` 最初叫 `new`，被对端会话当场指出——"一个刚读过的条目显示 `new`，读起来像未读"。它说得对。
+- **改名必须连标签表一起改**：改名时漏改了 `readMarker`/`stateLabel`，新状态名直接落到兜底值，表现是**刚收到的 request 第一次列出时完全没有标记**。现已由护栏测试钉住：每个状态都要有自己的标签，不许落到兜底。
 
 #### 真缺陷：`markReplied` 只查了通道的一端
 
-`awaiting-reply` 条目记录在**请求接收方**的收件箱里（`deliver` 写 `to: peerId`）。问题是**谁持有它，取决于这轮交换是谁先开口的**，而两个方向都合法：
+待回复条目记录在**请求接收方**的收件箱里（`deliver` 写 `to: peerId`）。问题是**谁持有它，取决于这轮交换是谁先开口的**，而两个方向都合法：
 
-| 场景 | 谁发 request | `awaiting-reply` 落在谁那里 | 谁回信 | 标记必须写进 |
+| 场景 | 谁发 request | 待回复条目落在谁那里 | 谁回信 | 标记必须写进 |
 |---|---|---|---|---|
 | A 收到请求后回信 | B | **A** | A | A（`other(channel, A)`） |
 | A 自己开的头,收到 B 的回信 | A | **B** | B | B（B 自己的） |
@@ -306,7 +320,7 @@ Windows 侧显示的"已修改"是视错觉——见坑 13。
 
 ### 一次改动的标准流程
 
-1. `npm run link` → `npm test`（60 项）
+1. `npm run link` → `npm test`（61 项）
 2. 任何涉及真机契约的改动 → **必须真机验一遍**：`./install.sh` + **重启 profile**（坑 1）
 3. 改了文案 → 同时补 `lib/i18n.js` 的 `zh` 与 `en`（有测试检查两张表的键完整性）
 4. 改了行为 → 更新 `docs/design.md` §12 的验证表

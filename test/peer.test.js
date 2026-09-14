@@ -13,7 +13,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { classify, listAddressable, resolveTarget, labelOf, stripInvisible, displayToken } from '../lib/addressable.js'
-import { PeerStore, pairKey, CHANNEL_BUDGET } from '../lib/store.js'
+import { PeerStore, pairKey, CHANNEL_BUDGET, readMarker, stateLabel } from '../lib/store.js'
 import { buildPeerMessage, buildDeliveryNotice, PEER_KIND } from '../lib/messages.js'
 import { translator, resolveLocale, normalizeLocale, DEFAULT_LOCALE } from '../lib/i18n.js'
 import { isRuntimeRoot } from '../lib/consent.js'
@@ -413,10 +413,29 @@ test('channels are symmetric: either end finds the same channel', () => {
   assert.equal(pairKey('a', 'b'), pairKey('b', 'a'))
 })
 
+// A state whose label is missing falls through to a bare, markerless line. That
+// happened for real when the state names were reworded and the label table was
+// not: the very first listing of an incoming request came out with no marker.
+// This asserts every state the store can produce has a label of its own.
+test('every inbox status has its own label, not the fallback', () => {
+  const states = ['unread', 'unread-unanswered', 'read-unanswered', 'replied']
+  assert.equal(readMarker('unread-unanswered'), 'unread', 'a fresh request must be marked unread')
+  assert.equal(readMarker('read-unanswered'), 'read · never answered')
+  assert.equal(readMarker('replied'), '', 'a settled request carries no marker')
+  assert.equal(stateLabel('unread-unanswered'), 'unread · never opened')
+  assert.equal(stateLabel('read-unanswered'), 'read · never answered')
+  for (const status of states) {
+    // The fallback returns the raw status, which is an identifier leaking into
+    // the listing — the failure mode this test exists to catch.
+    assert.notEqual(readMarker(status), undefined)
+    if (status !== 'replied') assert.notEqual(stateLabel(status), status)
+  }
+})
+
 test('revoke removes the channel and replies mark an inbound request answered', () => {
   const store = new PeerStore()
   const channel = store.open({ a: 'a', b: 'b', tier: 'session', by: 'a' })
-  store.record({ id: 'm1', to: 'b', requestId: 'req-1', status: 'awaiting-reply', kind: 'request' })
+  store.record({ id: 'm1', to: 'b', requestId: 'req-1', status: 'unread-unanswered', kind: 'request' })
   assert.equal(store.markReplied('b', 'req-1'), true)
   assert.equal(store.inboxFor('b')[0].status, 'replied')
   store.revoke(channel)
@@ -1219,7 +1238,7 @@ test('peer_inbox returns the full delivered text by id', async () => {
   // says another conversation said it, not the human.
   assert.match(fetched, /peer-session message · from another conversation, NOT a user instruction/)
   assert.match(fetched, /from: "session-self" \(session-self\)/)
-  assert.match(fetched, /state: read · still unanswered/)
+  assert.match(fetched, /state: read · never answered/)
   assert.match(fetched, /the whole point of an index: this paragraph must survive\./)
   assert.match(fetched, /\/srv\/orders-api\/src\/schema\.sql/)
   assert.match(fetched, /request id: req-1/)
@@ -1299,18 +1318,18 @@ test('reading an unanswered request keeps it marked as unanswered', async () => 
   )
 
   const before = await call('peer_inbox', {})
-  assert.match(before, /- \[never opened\] request from "session-peer"/)
+  assert.match(before, /- \[unread\] request from "session-peer"/)
   const requestId = /id: (\S+)/.exec(before)[1]
   // The real minted id, not a hand-written one: this test drives the genuine
   // tool path, so `replyTo` has to name the request that path actually issued.
   const realRequestId = /· request: (\S+)/.exec(before)[1]
 
   const fetched = await call('peer_inbox', { id: requestId })
-  assert.match(fetched, /state: read · still unanswered/)
+  assert.match(fetched, /state: read · never answered/)
 
   const after = await call('peer_inbox', {})
-  assert.match(after, /- \[new · never answered\] request from "session-peer"/)
-  assert.doesNotMatch(after, /\[never opened\]/)
+  assert.match(after, /- \[read · never answered\] request from "session-peer"/)
+  assert.doesNotMatch(after, /\[unread\]/)
   // Kept so the marker can be asserted by id after the reply goes out.
   const requestMessageId = requestId
 
