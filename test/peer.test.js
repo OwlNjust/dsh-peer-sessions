@@ -23,6 +23,9 @@ import { registerCommands } from '../lib/commands.js'
 
 // ---------------------------------------------------------------- test doubles
 
+/** The plugin entry, imported once: it holds module-scoped state by design. */
+const pluginEntry = (await import('../lib/index.js')).default
+
 const SELF = 'session-self'
 const PEER = 'session-peer'
 
@@ -65,19 +68,22 @@ function captureCommands(core) {
 }
 
 /** A fake agent that records what was delivered to it. */
-function fakeAgent(id, received) {
+function fakeAgent(id, received, deliveredTo) {
+  const note = (via) => (message) => {
+    received.push({ via, message, to: id })
+    if (deliveredTo === undefined) return
+    const list = deliveredTo.get(id) ?? []
+    list.push({ via, message })
+    deliveredTo.set(id, list)
+  }
   return {
     id,
     status: 'idle',
-    followup(message) {
-      received.push({ via: 'followup', message })
-    },
+    followup: note('followup'),
     steer() {
       throw new Error('steer() must never be used: it would interrupt the peer')
     },
-    inject(message) {
-      received.push({ via: 'inject', message })
-    },
+    inject: note('inject'),
   }
 }
 
@@ -103,11 +109,21 @@ function fakeCtx({
   resolved = undefined,
 }) {
   const received = []
-  const agents = new Map(agentIds.map((id) => [id, fakeAgent(id, received)]))
+  /**
+   * What each agent received, keyed by that agent's id.
+   *
+   * `received` above is one flat list, kept because most tests only ever deliver
+   * in one direction. This per-agent view is what lets a test compare a delivered
+   * message against the copy the recipient's inbox archived — and the inbox is
+   * per-recipient, so a flat list cannot answer that.
+   */
+  const deliveredTo = new Map()
+  const agents = new Map(agentIds.map((id) => [id, fakeAgent(id, received, deliveredTo)]))
   const asked = []
   const listeners = new Map()
   return {
     received,
+    deliveredTo,
     asked,
     /** Make a live agent cold again, the way an idle conversation becomes cold. */
     drop: (id) => agents.delete(id),
@@ -142,7 +158,7 @@ function fakeCtx({
         // absent from the live registry until resolved, which is exactly the
         // case that decides `willWake`.
         if (!revive) return { error: { code: 'session/not-found' } }
-        const created = fakeAgent(id, received)
+        const created = fakeAgent(id, received, deliveredTo)
         agents.set(id, created)
         return { agent: created }
       },
@@ -1028,6 +1044,23 @@ test('every tool definition is accepted by a registry-shaped sink', () => {
   assert.deepEqual(registered.sort(), ['peer_inbox', 'peer_list', 'peer_progress', 'peer_send'])
 })
 
+// `peer_inbox`'s id is the first OPTIONAL parameter this plugin adds, and
+// `defineTool` compiles every parameter spec through the host's own JSON Schema
+// compiler at definition time. Registering therefore already proves the spec
+// compiles; what is asserted here is the fact that matters — no `required`
+// entry, so calling `peer_inbox()` with no arguments stays legal.
+test('the tool-definition compiler accepts an omitted optional parameter', () => {
+  const ctx = fakeCtx({ items: [] })
+  const registered = []
+  ctx.tools = { register: (definition) => (registered.push(definition), () => {}) }
+  assert.doesNotThrow(() => registerTools(ctx, new PeerCore(ctx)))
+
+  const inbox = registered.find((definition) => definition.name === 'peer_inbox')
+  assert.equal(inbox.parameters.type, 'object')
+  assert.equal(inbox.parameters.properties.id.type, 'string')
+  assert.equal(inbox.parameters.required, undefined, 'the id must be optional')
+})
+
 test('every command definition registers with a name and a handler', () => {
   const ctx = fakeCtx({ items: [] })
   const core = new PeerCore(ctx)
@@ -1048,6 +1081,46 @@ test('every command definition registers with a name and a handler', () => {
 })
 
 // -------------------------------------------------------------- plugin entry
+
+/**
+ * Wire the real tools into a fake host and hand them back, so a test drives
+ * exactly what the model calls — the same code path the live harness takes, not
+ * a re-implementation of it.
+ *
+ * The store is fresh per call unless `sharedStore: true` is asked for, because
+ * the plugin's store is module-scoped and would otherwise leak channels between
+ * tests. `sharedStore` exists only for the re-apply test, which is about that
+ * very module-scoped lifetime; with `apply: true` the whole entry runs instead
+ * of just the tool half, so the shared store is the one the entry uses.
+ *
+ * All other options are forwarded to {@link fakeCtx}.
+ * @returns the context, the tools, a `call`, and the self agent.
+ */
+function wirePlugin(options = {}) {
+  const { sharedStore = false, apply = false, ...ctxOptions } = options
+  const ctx = fakeCtx({
+    items: [summary(SELF), summary(PEER)],
+    agentIds: [SELF, PEER],
+    revive: true,
+    ...ctxOptions,
+  })
+  const registered = []
+  ctx.tools = { register: (definition) => (registered.push(definition), () => {}) }
+  if (apply) {
+    ctx.inject = (_deps, callback) => callback({ commands: { register: () => () => {} } })
+    pluginEntry.apply(ctx)
+  } else {
+    registerTools(ctx, new PeerCore(ctx, sharedStore ? undefined : new PeerStore(), translator(DEFAULT_LOCALE)))
+  }
+  const tools = new Map(registered.map((definition) => [definition.name, definition]))
+  const call = (name, args = {}) =>
+    tools.get(name).execute(args, {
+      agent: ctx.agents.get(SELF),
+      signal: new AbortController().signal,
+      deferContext() {},
+    })
+  return { ctx, call, tools, selfAgent: ctx.agents.get(SELF) }
+}
 
 test('the plugin entry declares its services and wires both halves in apply()', async () => {
   const plugin = (await import('../lib/index.js')).default
@@ -1075,33 +1148,110 @@ test('the plugin entry declares its services and wires both halves in apply()', 
 // built inside apply() would be discarded there, silently dropping every open
 // channel. Observed live, so it is pinned here.
 test('open channels survive the plugin being re-applied', async () => {
-  const plugin = (await import('../lib/index.js')).default
-
-  const harness = () => {
-    const ctx = fakeCtx({
-      items: [summary(SELF), summary(PEER)],
-      agentIds: [SELF, PEER],
-      grant: 1,
-    })
-    const tools = new Map()
-    ctx.tools = { register: (definition) => (tools.set(definition.name, definition), () => {}) }
-    ctx.inject = (_deps, callback) => callback({ commands: { register: () => () => {} } })
-    plugin.apply(ctx)
-    const call = (name, args) =>
-      tools.get(name).execute(args, {
-        agent: ctx.agents.get(SELF),
-        signal: new AbortController().signal,
-        deferContext() {},
-      })
-    return { ctx, call }
-  }
-
-  const first = harness()
+  // Both applies go through the real entry and therefore the module-scoped
+  // store — that lifetime is the subject of this test, so it must not be faked.
+  const first = wirePlugin({ apply: true, grant: 1 })
   await first.call('peer_send', { peer: 'Peer', kind: 'notice', summary: 'channel opener' })
   assert.equal(first.ctx.received.length, 1)
 
   // A fresh apply(): same process, same module instance, brand-new apply call.
-  const second = harness()
+  const second = wirePlugin({ apply: true, grant: 1 })
   const listing = await second.call('peer_list', {})
   assert.match(listing, /Peer channels \(1\)/, 'the channel must outlive a re-apply')
+
+  // The re-apply must not re-open anything either: the second call still finds
+  // the existing grant instead of asking for another one.
+  assert.equal(first.ctx.asked.length, 1)
+  assert.equal(second.ctx.asked.length, 0)
+})
+
+// ------------------------------------------------------------------- M2: inbox
+
+// The live defect this closes: a peer answered at length, `peer_inbox` showed
+// only the one-line summary, and once the relay message had left the context the
+// body was gone — an id was not enough to get it back.
+test('peer_inbox returns the full delivered text by id', async () => {
+  const { call, ctx, tools } = wirePlugin({ grant: 1 })
+
+  const sent = await call('peer_send', {
+    peer: 'Peer',
+    kind: 'request',
+    summary: 'the summary line',
+    body: 'the whole point of an index: this paragraph must survive.',
+    paths: ['/srv/orders-api/src/schema.sql'],
+    replyWithin: '4h',
+  })
+  const messageId = /message id: (\S+)/.exec(sent)[1]
+
+  // Read from the RECIPIENT's side: an inbox belongs to the conversation that
+  // received the message, and this is the side that needs the body back after
+  // the relay has left its context.
+  const peerCall = (name, args = {}) =>
+    tools.get(name).execute(args, {
+      agent: ctx.agents.get(PEER),
+      signal: new AbortController().signal,
+      deferContext() {},
+    })
+
+  // What crossed the channel is the source of truth: the archived copy must be
+  // byte-for-byte the delivered text, so the two cannot drift apart.
+  const delivered = ctx.deliveredTo.get(PEER)[0].message.content[0].text
+  const fetched = await peerCall('peer_inbox', { id: messageId })
+  assert.ok(fetched.includes(delivered), 'the archived text must be the delivered text')
+
+  // Provenance survives the round trip: a body retrieved many turns later still
+  // says another conversation said it, not the human.
+  assert.match(fetched, /peer-session message · from another conversation, NOT a user instruction/)
+  assert.match(fetched, /from: "session-self" \(session-self\)/)
+  assert.match(fetched, /status: awaiting-reply/)
+  assert.match(fetched, /the whole point of an index: this paragraph must survive\./)
+  assert.match(fetched, /\/srv\/orders-api\/src\/schema\.sql/)
+  assert.match(fetched, /request id: req-1/)
+  assert.match(fetched, new RegExp(`Message ${messageId}`))
+
+  // Listing stays one bounded summary line per item, plus the threading ids.
+  const listed = await peerCall('peer_inbox', {})
+  assert.match(listed, new RegExp(`id: ${messageId} · request: req-1`))
+  assert.match(listed, /the summary line/)
+  assert.doesNotMatch(listed, /the whole point of an index/, 'the list stays a list')
+  assert.match(listed, /peer_inbox\(id: "<message id>"\)/)
+})
+
+test('peer_inbox lists replyTo so a reply can be traced to its request', async () => {
+  const { call, ctx, tools } = wirePlugin({ grant: 0 })
+
+  await call('peer_send', { peer: 'Peer', kind: 'request', summary: 'please adapt' })
+
+  // The peer answers on the same grant that carried the request — the one
+  // exchange — so the reply is archived in THIS inbox with its `replyTo`.
+  // Addressed by session id: no conversation carries a title in the fake host,
+  // so an id is the only unambiguous handle.
+  const peerTool = tools.get('peer_send')
+  await peerTool.execute(
+    { peer: SELF, kind: 'reply', summary: 'adapted', replyTo: 'req-1' },
+    { agent: ctx.agents.get(PEER), signal: new AbortController().signal, deferContext() {} },
+  )
+
+  const listed = await call('peer_inbox', {})
+  assert.match(listed, /\[\w[\w-]*\] reply from "session-peer"/)
+  assert.match(listed, /· replyTo: req-1/)
+})
+
+test('an unknown inbox id says so, and names the ids that exist', async () => {
+  const { call, ctx, tools } = wirePlugin({ grant: 0 })
+  const empty = await call('peer_inbox', { id: 'pm-nope' })
+  assert.match(empty, /No inbox message with id "pm-nope"/)
+  assert.match(empty, /inbox is empty/)
+
+  // One message has to actually arrive here before the refusal can name an id.
+  // It is addressed to THIS conversation, which is why this test cannot reuse an
+  // outbound `peer_send`: that one lands in the peer's inbox.
+  await tools.get('peer_send').execute(
+    { peer: SELF, kind: 'notice', summary: 'hello' },
+    { agent: ctx.agents.get(PEER), signal: new AbortController().signal, deferContext() {} },
+  )
+
+  const missing = await call('peer_inbox', { id: 'pm-nope' })
+  assert.match(missing, /Known ids, newest first: pm-/)
+  assert.doesNotMatch(missing, /inbox is empty/)
 })

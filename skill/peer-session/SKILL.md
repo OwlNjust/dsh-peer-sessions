@@ -55,9 +55,15 @@ that is the human authorization gesture, and it is one short line.
 | Tool | Use it for |
 |---|---|
 | `peer_send` | `notice` (inform), `request` (needs an answer), `reply` (answer a request), `message` (plain) |
-| `peer_inbox` | Unread, awaiting-reply, timed-out items |
+| `peer_inbox` | Unread, awaiting-reply, timed-out items — summaries; add `id` to read one in full |
 | `peer_progress` | A peer's state: title, status, turn/step, goal, todos, recent summaries |
 | `peer_list` | Channels and what you may do on each |
+
+**`peer_inbox` is an index, not just a notification.** Called with no argument it lists one
+summary line per item, each with a message id. Called with `id: "<message id>"` it returns that
+message's complete delivered text, exactly as the peer wrote it — so a long answer is still
+recoverable after the original relay message has scrolled out of your context. If you only have
+a summary line and need the detail, pass its id instead of asking the peer to resend.
 
 ## Message protocol
 
