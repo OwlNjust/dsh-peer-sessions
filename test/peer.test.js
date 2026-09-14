@@ -135,6 +135,50 @@ test('label falls back to the workspace basename when no title is known', () => 
   assert.equal(labelOf(ctx, summary('x', { cwd: '/work/proj' })), 'proj')
 })
 
+// A projection value is JsonValue, so `null` is legal. Checking only for
+// `undefined` before reading a property crashes on it — which is what a real
+// session with an unset title projection supplies. Found on the first live run.
+test('a null projection value is not treated as an object', () => {
+  const ctx = fakeCtx({ items: [] })
+  const nullTitle = summary('x', { cwd: '/work/proj', projections: { asOfSeq: 0, values: { title: null } } })
+  assert.doesNotThrow(() => labelOf(ctx, nullTitle))
+  assert.equal(labelOf(ctx, nullTitle), 'proj')
+})
+
+// The three shapes the title projection actually takes in the wild, all
+// confirmed against the on-disk projection cache.
+test('every real title projection shape resolves to the title text', () => {
+  const ctx = fakeCtx({ items: [] })
+  const cases = [
+    ['bare string', 'Paper pipeline'],
+    ['cached record', { ver: 1, seq: 53, val: 'Paper pipeline' }],
+    ['title snapshot', { title: 'Paper pipeline', source: 'model', eventSeq: 53, updatedAt: 1 }],
+  ]
+  for (const [name, value] of cases) {
+    const row = summary('x', { projections: { asOfSeq: 0, values: { title: value } } })
+    assert.equal(labelOf(ctx, row), 'Paper pipeline', `${name} should resolve`)
+  }
+  // A present-but-empty title must still fall back rather than show "".
+  const empty = summary('x', { cwd: '/work/proj', projections: { asOfSeq: 0, values: { title: { ver: 1, seq: 2, val: null } } } })
+  assert.equal(labelOf(ctx, empty), 'proj')
+})
+
+test('listAddressable survives null, string, and array projection values', async () => {
+  const ctx = fakeCtx({
+    items: [
+      summary(SELF, { projections: { asOfSeq: 0, values: { title: null } } }),
+      summary(PEER, { projections: { asOfSeq: 0, values: { title: 'Peer', goal: null, todo: 'nonsense', inbox: [] } } }),
+    ],
+  })
+  const entries = await listAddressable(ctx)
+  assert.deepEqual(
+    entries.map((entry) => entry.label),
+    ['session-self', 'Peer'],
+  )
+  const core = new PeerCore(ctx)
+  assert.doesNotThrow(() => core.progress(entries[1]))
+})
+
 // --------------------------------------------------------------- resolveTarget
 
 test('resolveTarget matches an exact id, an exact title, and a partial title', () => {
