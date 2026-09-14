@@ -3,8 +3,8 @@
 # This repository is created and committed from WSL, where everything is already
 # LF, and it ships shell scripts — a CRLF in a shebang breaks them on Linux. The
 # concrete risk is someone editing through the Windows side (Notepad, Windows VS
-# Code) over a \\wsl.localhost path, which introduces CRLF silently. Pinning it
-# here makes that impossible rather than merely unlikely.
+# Code) across the boundary into the WSL filesystem, which introduces CRLF
+# silently. Pinning it here makes that impossible rather than merely unlikely.
 #
 # NOT covered here, and worth knowing: the executable bit. Git has no attribute
 # for file mode, so install.sh, uninstall.sh, and scripts/link-deps.sh depend on

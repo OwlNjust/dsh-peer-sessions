@@ -6,4 +6,9 @@ node_modules
 node_modules/
 
 *.log
+
+# The private, machine-specific companion to the public MAINTENANCE.md.
+# It holds proxy ports, UNC paths and account names — nothing that may be
+# published. The public handover doc points to it by name only.
+MAINTENANCE-NOTES.md
 .DS_Store

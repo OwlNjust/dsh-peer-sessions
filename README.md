@@ -52,7 +52,7 @@ source for what this should do and why.
 
 **[MAINTENANCE.md](MAINTENANCE.md)** is written for whoever picks this up next,
 including a fresh agent conversation with no history: how it is wired in, the
-four invariants, and twelve traps that have already cost real time — the loader
+four invariants, and thirteen traps that have already cost real time — the loader
 that re-applies a plugin without re-reading its module, the skill that cannot be
 symlinked, the `node_modules` link that must be a link, and the projection shapes
 that are not what you would guess.

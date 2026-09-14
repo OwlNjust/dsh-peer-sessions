@@ -46,7 +46,7 @@ const addressable = summaries.filter(s =>
 
 ## 维护
 
-**[MAINTENANCE.md](MAINTENANCE.md)** 写给下一个接手的人，包括**没有任何历史上下文的新对话**：怎么接线、四条硬不变量，以及十二个**已经真实花过时间**的坑——会 re-apply 却不重新读模块的加载器、不能软链的技能、必须是软链的 `node_modules`、以及和直觉不符的投影形状。
+**[MAINTENANCE.md](MAINTENANCE.md)** 写给下一个接手的人，包括**没有任何历史上下文的新对话**：怎么接线、四条硬不变量，以及十三个**已经真实花过时间**的坑——会 re-apply 却不重新读模块的加载器、不能软链的技能、必须是软链的 `node_modules`、以及和直觉不符的投影形状。
 
 **动手前先读它。**
 
