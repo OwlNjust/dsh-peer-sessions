@@ -56,14 +56,10 @@ say ""
   || fail "deployment packages not found: ${DEPLOY_NODE_MODULES}"
 
 # ------------------------------------------------ 1. module resolution link
+# One implementation, in scripts/, because this is the step a newcomer gets
+# stuck on and it must not exist in two slightly different forms.
 say "[1/4] module resolution  (${REPO_DIR}/node_modules)"
-if [ -e "${REPO_DIR}/node_modules" ] && [ ! -L "${REPO_DIR}/node_modules" ]; then
-  warn "${REPO_DIR}/node_modules exists and is not a symlink — leaving it alone."
-  warn "if imports fail, remove it and re-run this script."
-else
-  ln -sfn "${DEPLOY_NODE_MODULES}" "${REPO_DIR}/node_modules"
-  say "      -> ${DEPLOY_NODE_MODULES}"
-fi
+bash "${REPO_DIR}/scripts/link-deps.sh"
 say ""
 
 # --------------------------------------------------- 2. profile dependency

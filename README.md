@@ -10,7 +10,7 @@
 
 ## What it is
 
-Two long-lived sessions — say `/mnt/d/CodeWorks` and `/mnt/d/CodeWorks/GarmentCodaData` —
+Two long-lived sessions — say `/srv/orders-api` and `/srv/web-client` —
 that both belong to you and neither of which outranks the other. When one changes an API
 contract, it tells the other. When the other finishes adapting, it replies.
 
@@ -45,7 +45,19 @@ no cache.
 
 ## Design
 
-Full frozen specification: **[docs/design.md](docs/design.md)**.
+Full frozen specification: **[docs/design.md](docs/design.md)** — the authoritative
+source for what this should do and why.
+
+## Maintaining it
+
+**[MAINTENANCE.md](MAINTENANCE.md)** is written for whoever picks this up next,
+including a fresh agent conversation with no history: how it is wired in, the
+four invariants, and twelve traps that have already cost real time — the loader
+that re-applies a plugin without re-reading its module, the skill that cannot be
+symlinked, the `node_modules` link that must be a link, and the projection shapes
+that are not what you would guess.
+
+Read it before changing anything.
 
 ## Interfaces
 

@@ -276,14 +276,14 @@ test('resolveTarget excludes the asking session itself', () => {
 // along: the session sits in the hidden set, with a code that says why.
 test('an archived target is refused by name, not with the whole list', async () => {
   const ctx = fakeCtx({
-    items: [titled(SELF, 'Me'), titled('session-gone', 'CodeTools')],
+    items: [titled(SELF, 'Me'), titled('session-gone', 'Peer')],
     archived: ['session-gone'],
   })
   const core = new PeerCore(ctx, undefined, translator('zh'))
   await assert.rejects(
-    () => core.resolveOrRefuse('CodeTools', SELF, undefined),
+    () => core.resolveOrRefuse('Peer', SELF, undefined),
     (error) => {
-      assert.match(error.message, /「CodeTools」已归档/)
+      assert.match(error.message, /「Peer」已归档/)
       assert.doesNotMatch(error.message, /当前可见的会话/, 'a named reason beats a wall of candidates')
       return true
     },
@@ -345,19 +345,19 @@ test('displayToken shows code points only when a reader could be misled', () => 
 })
 
 test('resolveTarget matches a title pasted with a zero-width character', () => {
-  const entries = [{ sessionId: PEER, title: 'CodeTools', label: 'CodeTools' }]
-  assert.equal(resolveTarget(entries, 'Code\u200BTools', SELF).entry.sessionId, PEER)
+  const entries = [{ sessionId: PEER, title: 'Peer', label: 'Peer' }]
+  assert.equal(resolveTarget(entries, 'Pe\u200Ber', SELF).entry.sessionId, PEER)
 })
 
 test('a pasted subcommand carrying a zero-width character still parses', async () => {
-  const ctx = fakeCtx({ items: [titled(SELF, 'Me'), titled(PEER, 'CodeTools')], agentIds: [SELF, PEER] })
+  const ctx = fakeCtx({ items: [titled(SELF, 'Me'), titled(PEER, 'Peer')], agentIds: [SELF, PEER] })
   const core = new PeerCore(ctx, undefined, translator('zh'))
   const handlers = captureCommands(core)
   // Exactly what the live failure looked like: the space after `connect` had
   // been pasted as text containing an invisible character.
   const result = await handlers.peer({
     agent: ctx.agents.get(SELF),
-    rawInput: ' connect\u200B CodeTools session',
+    rawInput: ' connect\u200B Peer session',
     signal: new AbortController().signal,
   })
   assert.equal(result.kind, 'success')
@@ -365,13 +365,13 @@ test('a pasted subcommand carrying a zero-width character still parses', async (
 })
 
 test('a genuinely unrecognizable subcommand is reported with its code points', async () => {
-  const ctx = fakeCtx({ items: [titled(SELF, 'Me'), titled(PEER, 'CodeTools')], agentIds: [SELF, PEER] })
+  const ctx = fakeCtx({ items: [titled(SELF, 'Me'), titled(PEER, 'Peer')], agentIds: [SELF, PEER] })
   const core = new PeerCore(ctx, undefined, translator('zh'))
   const handlers = captureCommands(core)
   // Cyrillic "о": a homoglyph that renders as `connect`.
   const result = await handlers.peer({
     agent: ctx.agents.get(SELF),
-    rawInput: ' c\u043Ennect CodeTools session',
+    rawInput: ' c\u043Ennect Peer session',
     signal: new AbortController().signal,
   })
   assert.equal(result.kind, 'error')

@@ -1,7 +1,7 @@
 ---
 name: peer-session
 description: Talk to another conversation at the same level — send a message, ask a question, reply, or read a peer's projected progress. Use when the user asks you to notify, hand off to, ask, or check on ANOTHER conversation they are running, or when a peer message arrives and needs an answer. Channels are symmetric — no parent, no child — and must be granted by the user before anything is delivered.
-whenToUse: The user says things like "告诉「文献阅读」那个会话…", "和 X 建个通道", "看看那边进度到哪了", "它改完让它回我一声"; or a message arrives marked as a peer-session message and you must reply or continue the collaboration.
+whenToUse: The user says things like "tell the data-pipeline conversation…", "open a channel to X", "check how far that side has got", or "have it ping me when it is done"; or a message arrives marked as a peer-session message and you must reply or continue the collaboration.
 ---
 
 # Peer sessions
@@ -67,9 +67,9 @@ the other session can read anything on this machine itself, so sending text is w
 and a needless second copy.
 
 ```
-peer_send(peer:'GarmentCodaData', kind:'notice',
+peer_send(peer:'orders-api', kind:'notice',
   summary:'/api/v2/orders: items[].amount 单位由元改为分',
-  paths:['/mnt/d/CodeWorks/GarmentCodaData/src/routes/orders.ts:42-58'])
+  paths:['/srv/web-client/src/routes/orders.ts:42-58'])
 ```
 
 For anything requiring an answer use `request` with a `replyWithin`, and answer incoming

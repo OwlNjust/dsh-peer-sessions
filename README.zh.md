@@ -9,7 +9,7 @@
 
 ## 这是什么
 
-两个长期会话——比如 `/mnt/d/CodeWorks` 和 `/mnt/d/CodeWorks/GarmentCodaData`——都归你，
+两个长期会话——比如 `/srv/orders-api` 和 `/srv/web-client`——都归你，
 谁也不比谁高一级。一个改了 API 契约就通知另一个；另一个改完就回一声。
 
 这**不是** `subagent`。分界线是：
@@ -42,7 +42,13 @@ const addressable = summaries.filter(s =>
 
 ## 设计
 
-完整冻结规格见 **[docs/design.md](docs/design.md)**。
+完整冻结规格见 **[docs/design.md](docs/design.md)** —— 它规定"应该做成什么样、为什么"，是唯一权威来源。
+
+## 维护
+
+**[MAINTENANCE.md](MAINTENANCE.md)** 写给下一个接手的人，包括**没有任何历史上下文的新对话**：怎么接线、四条硬不变量，以及十二个**已经真实花过时间**的坑——会 re-apply 却不重新读模块的加载器、不能软链的技能、必须是软链的 `node_modules`、以及和直觉不符的投影形状。
+
+**动手前先读它。**
 
 ## 接口
 

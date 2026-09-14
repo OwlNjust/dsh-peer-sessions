@@ -15,12 +15,15 @@
   "files": [
     "lib",
     "skill",
+    "scripts",
     "cordis.patch.yml",
+    "MAINTENANCE.md",
     "README.md",
     "README.zh.md",
     "LICENSE"
   ],
   "scripts": {
+    "link": "bash scripts/link-deps.sh",
     "test": "node --test"
   },
   "keywords": [
