@@ -417,7 +417,10 @@ test('a cold peer is woken and delivered to once both prompts are approved', asy
 
 // --------------------------------------------------------- progress boundaries
 
-test('progress reports projections but never transcript content', async () => {
+// Fixtures below use the ACTUAL projection shapes, read from their declaring
+// packages. The first live run failed precisely because fixtures were faithful
+// to the types and unfaithful to the data.
+test('progress renders the real goal, todos, and turn outline shapes', () => {
   const ctx = fakeCtx({ items: [] })
   const core = new PeerCore(ctx)
   const lines = core.progress({
@@ -427,14 +430,91 @@ test('progress reports projections but never transcript content', async () => {
     cwd: '/work/peer',
     updatedAt: 1_700_000_000_000,
     projections: {
-      goal: { objective: 'ship the API', phase: 'active' },
-      todo: { items: [{ status: 'completed' }, { status: 'pending' }] },
-      mystery: { secretTranscript: 'should not be printed' },
+      // dsh-goal: goal: GoalProjection | null, snapshot nested one level down
+      goal: { goal: { objective: 'ship the API', phase: 'active' }, roundsStarted: 3, createdAt: 1, updatedAt: 2 },
+      // dsh-tool-todo: todos: TodoItem[] | null — an ARRAY, not { items }
+      todos: [
+        { content: 'write the route', status: 'completed' },
+        { content: 'update the client', status: 'in_progress' },
+        { content: 'ship it', status: 'pending' },
+      ],
+      // dsh-session-turn-outline: turnOutline: TurnOutlineEntry[]
+      turnOutline: [
+        { turn: 1, seq: 1, prompt: 'first prompt', response: 'first answer' },
+        { turn: 2, seq: 9, prompt: 'second prompt', response: '' },
+      ],
+      permissions: { currentValue: 'workspace-write' },
+      inbox: { 'next-turn': [{ id: 'm1' }], 'next-step': [] },
     },
   })
   const text = lines.join('\n')
-  assert.match(text, /ship the API/)
-  assert.match(text, /1 of 2 complete/)
+  assert.match(text, /goal: ship the API \[active\] · round 3/)
+  assert.match(text, /todos: 1 of 3 complete · now: update the client/)
+  assert.match(text, /turns so far: 2/)
+  assert.match(text, /turn 1: first prompt → first answer/)
+  assert.match(text, /turn 2: second prompt/)
+  assert.match(text, /permissions: workspace-write/)
+  assert.match(text, /queued input: 1 for the next turn, 0 for the next step/)
+})
+
+test('progress treats null and wrong-shaped projections as absent', () => {
+  const ctx = fakeCtx({ items: [] })
+  const core = new PeerCore(ctx)
+  const lines = core.progress({
+    sessionId: PEER,
+    label: 'Peer',
+    running: false,
+    updatedAt: 1_700_000_000_000,
+    projections: {
+      goal: null,
+      todos: null,
+      turnOutline: null,
+      permissions: [],
+      inbox: 'nonsense',
+    },
+  })
+  assert.doesNotThrow(() => lines.join('\n'))
+  const text = lines.join('\n')
+  // Every one of these is a recognised key rendered from a shape it is not, so
+  // each must contribute nothing at all — no line, no crash, and no fall-through
+  // into the "other projections" list either.
+  assert.doesNotMatch(text, /goal:/)
+  assert.doesNotMatch(text, /todos:/)
+  assert.doesNotMatch(text, /turns so far:/)
+  assert.doesNotMatch(text, /permissions:/)
+  assert.doesNotMatch(text, /queued input:/)
+  assert.doesNotMatch(text, /other projections present/)
+})
+
+test('progress clips previews so a widened projection cannot become a transcript', () => {
+  const ctx = fakeCtx({ items: [] })
+  const core = new PeerCore(ctx)
+  const huge = 'x'.repeat(5000)
+  const text = core
+    .progress({
+      sessionId: PEER,
+      label: 'Peer',
+      running: true,
+      updatedAt: 1_700_000_000_000,
+      projections: { turnOutline: [{ turn: 1, seq: 1, prompt: huge, response: huge }] },
+    })
+    .join('\n')
+  assert.ok(text.length < 1000, `expected the preview to be clipped, got ${text.length} chars`)
+  assert.doesNotMatch(text, /x{300}/)
+})
+
+test('an unknown projection contributes its name but never its value', () => {
+  const ctx = fakeCtx({ items: [] })
+  const core = new PeerCore(ctx)
+  const text = core
+    .progress({
+      sessionId: PEER,
+      label: 'Peer',
+      running: true,
+      updatedAt: 1_700_000_000_000,
+      projections: { mystery: { secretTranscript: 'should not be printed' } },
+    })
+    .join('\n')
   assert.match(text, /other projections present: mystery/)
   assert.doesNotMatch(text, /should not be printed/)
 })

@@ -231,10 +231,19 @@ peer 消息**不能**：批准任何东西、修改任何权限、发起新的 p
 
 5. **`sessionController.list({}, signal)` 返回 `{ items }`**，是两参数签名；`resolveAgent()` 以 `{ agent } | { error }` 返回，不抛异常。
 
+6. **投影值是 `JsonValue`，且真实形状与直觉不符。**
+   `SessionProjectionValue = JsonValue`，所以**键存在不等于值是对象**——`projections.values.title` 对所有尚无标题的会话就是 `null`，首次真机运行正是在这里崩溃。实测到的真实形状：
+   - `title`：`list()` 给的是**已解包的值**——有标题时为字符串，缺失时为 `null`。（这条由崩溃本身反推：若传的是缓存原始记录 `{ver, seq, val}`，`val: null` 就是个对象，不会崩。）磁盘上的投影缓存另存为 `{ver, seq, val}`。
+   - `todos`：`TodoItem[] | null`，条目为 `{ content, status }`——是**数组**，不是 `{ items }`。
+   - `goal`：`GoalProjection | null`，目标文本嵌在 `goal.goal.objective`，配 `goal.goal.phase` 与 `goal.roundsStarted`。
+   - `inbox`：`{ 'next-turn': [], 'next-step': [] }`。
+   - `turnOutline`：`TurnOutlineEntry[]`，条目为 `{ turn, seq, prompt, response }` 的**有界预览**——C1 要的"轮次/步骤 + 最近摘要"正来自它。
+
+   教训：单元测试的 fixture 必须用**真实形状**。初版测试全部用对象或 `{}`，对类型忠实、对数据不忠实，因此上面每一条都漏过了。
+
 ### 仍未在生产中验证的部分
 
-- 在一个**真实的双会话场景**里跑完整链路（M1 验收）——单元测试用假上下文覆盖了全部不变量，但真实进程里的 `followup` 唤醒时序、以及重名消歧的实际体验，只有跑一次才算数。
-- 补丁行加载后，全局注册的 4 个工具与 2 条命令在**其他会话**中的实际可见范围。
+- 完整的双会话投递链路：授权卡片 → 冷会话唤醒确认 → 对端收到 relay 消息 → 回信。只读路径（`peer_list` / `peer_progress`）已在真机验证通过，写入路径尚未。
 
 ## 13. 里程碑与进度
 
