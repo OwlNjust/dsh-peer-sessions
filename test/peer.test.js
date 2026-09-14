@@ -373,6 +373,106 @@ test('a second delivery reuses the granted channel without asking again', async 
   assert.equal(ctx.received.length, 2)
 })
 
+// `once` means one EXCHANGE, not one message. The answer to a request the same
+// grant carried must ride along; otherwise the card would be raised again in the
+// PEER's conversation, reading as "didn't I just approve this?".
+test('a once grant buys one exchange: the answer rides the same approval', async () => {
+  const ctx = fakeCtx({
+    items: [summary(SELF), summary(PEER)],
+    agentIds: [SELF, PEER],
+    consent: 'Allow once',
+  })
+  const core = new PeerCore(ctx)
+  const selfAgent = ctx.agents.get(SELF)
+  const peerAgent = ctx.agents.get(PEER)
+
+  const asked = await core.deliver({
+    selfAgent,
+    selfLabel: 'Me',
+    peerEntry: { sessionId: PEER, label: 'Peer', running: true, projections: {} },
+    payload: { kind: 'request', summary: 'please adapt', requestId: 'req-1' },
+  })
+  assert.equal(asked.outcome, 'delivered')
+  assert.equal(asked.channel.remaining, 0, 'the request spends the single delivery')
+  assert.equal(ctx.asked.length, 1)
+
+  const answered = await core.deliver({
+    selfAgent: peerAgent,
+    selfLabel: 'Peer',
+    peerEntry: { sessionId: SELF, label: 'Me', running: true, projections: {} },
+    payload: { kind: 'reply', summary: 'adapted', replyTo: 'req-1' },
+  })
+  assert.equal(answered.outcome, 'delivered')
+  assert.equal(answered.ridesExistingGrant, true)
+  assert.equal(ctx.asked.length, 1, 'the answer must not raise a second card')
+  assert.equal(core.store.between(SELF, PEER), undefined, 'the exchange is complete')
+})
+
+test('a once grant does not carry an unrelated second message', async () => {
+  const ctx = fakeCtx({
+    items: [summary(SELF), summary(PEER)],
+    agentIds: [SELF, PEER],
+    consent: 'Allow once',
+  })
+  const core = new PeerCore(ctx)
+  const peerEntry = { sessionId: PEER, label: 'Peer', running: true, projections: {} }
+  const selfAgent = ctx.agents.get(SELF)
+  await core.deliver({ selfAgent, selfLabel: 'Me', peerEntry, payload: { kind: 'notice', summary: 'one' } })
+  await core.deliver({ selfAgent, selfLabel: 'Me', peerEntry, payload: { kind: 'notice', summary: 'two' } })
+  assert.equal(ctx.asked.length, 2, 'a spent once grant must not carry a second message')
+})
+
+test('an unknown replyTo does not unlock a spent once grant', async () => {
+  const ctx = fakeCtx({
+    items: [summary(SELF), summary(PEER)],
+    agentIds: [SELF, PEER],
+    consent: 'Allow once',
+  })
+  const core = new PeerCore(ctx)
+  const selfAgent = ctx.agents.get(SELF)
+  const peerAgent = ctx.agents.get(PEER)
+  await core.deliver({
+    selfAgent,
+    selfLabel: 'Me',
+    peerEntry: { sessionId: PEER, label: 'Peer', running: true, projections: {} },
+    payload: { kind: 'request', summary: 'please adapt', requestId: 'req-1' },
+  })
+  await core.deliver({
+    selfAgent: peerAgent,
+    selfLabel: 'Peer',
+    peerEntry: { sessionId: SELF, label: 'Me', running: true, projections: {} },
+    payload: { kind: 'reply', summary: 'unsolicited', replyTo: 'req-does-not-exist' },
+  })
+  assert.equal(ctx.asked.length, 2)
+})
+
+// The unlock is directional: naming a request that the REPLIER itself issued
+// (rather than the peer) must not spend the other side's budget.
+test('a reply cannot unlock the grant by naming its own request', async () => {
+  const ctx = fakeCtx({
+    items: [summary(SELF), summary(PEER)],
+    agentIds: [SELF, PEER],
+    consent: 'Allow once',
+  })
+  const core = new PeerCore(ctx)
+  const selfAgent = ctx.agents.get(SELF)
+  const peerEntry = { sessionId: PEER, label: 'Peer', running: true, projections: {} }
+  await core.deliver({
+    selfAgent,
+    selfLabel: 'Me',
+    peerEntry,
+    payload: { kind: 'request', summary: 'mine', requestId: 'req-1' },
+  })
+  // SELF now claims to be replying to its own request.
+  await core.deliver({
+    selfAgent,
+    selfLabel: 'Me',
+    peerEntry,
+    payload: { kind: 'reply', summary: 'to myself', replyTo: 'req-1' },
+  })
+  assert.equal(ctx.asked.length, 2)
+})
+
 test('a cold peer is not woken when the human declines the wake prompt', async () => {
   const ctx = fakeCtx({
     items: [summary(SELF), summary(PEER, { running: false })],
