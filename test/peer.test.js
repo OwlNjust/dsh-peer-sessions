@@ -622,6 +622,18 @@ test('a once grant buys one exchange: the answer rides the same approval', async
   assert.equal(answered.ridesExistingGrant, true)
   assert.equal(ctx.asked.length, 1, 'the answer must not raise a second card')
   assert.equal(core.store.between(SELF, PEER), undefined, 'the exchange is complete')
+
+  // Here SELF started the exchange by sending the request, so the
+  // `awaiting-reply` item is in PEER's inbox — measured, not inferred: a probe
+  // over both inboxes showed exactly that. PEER answering it must therefore mark
+  // its OWN inbox. The mirror case (a session answering a request it received)
+  // puts the request at the other end, which is why `markReplied` looks at both.
+  assert.equal(
+    core.noteReply(PEER, 'req-1', answered.channel),
+    true,
+    'the marker must reach whichever end holds the request',
+  )
+  assert.equal(core.store.inboxFor(PEER)[0].status, 'replied')
 })
 
 test('a once grant does not carry an unrelated second message', async () => {
@@ -1106,11 +1118,12 @@ function wirePlugin(options = {}) {
   })
   const registered = []
   ctx.tools = { register: (definition) => (registered.push(definition), () => {}) }
+  const store = sharedStore ? undefined : new PeerStore()
   if (apply) {
     ctx.inject = (_deps, callback) => callback({ commands: { register: () => () => {} } })
     pluginEntry.apply(ctx)
   } else {
-    registerTools(ctx, new PeerCore(ctx, sharedStore ? undefined : new PeerStore(), translator(DEFAULT_LOCALE)))
+    registerTools(ctx, new PeerCore(ctx, store, translator(DEFAULT_LOCALE)))
   }
   const tools = new Map(registered.map((definition) => [definition.name, definition]))
   const call = (name, args = {}) =>
@@ -1119,7 +1132,10 @@ function wirePlugin(options = {}) {
       signal: new AbortController().signal,
       deferContext() {},
     })
-  return { ctx, call, tools, selfAgent: ctx.agents.get(SELF) }
+  // `store` is exposed so a test can assert the state a path leaves BEHIND, not
+  // just what it returned — the difference that matters for read and reply
+  // markers.
+  return { ctx, call, tools, store, selfAgent: ctx.agents.get(SELF) }
 }
 
 test('the plugin entry declares its services and wires both halves in apply()', async () => {
@@ -1203,7 +1219,7 @@ test('peer_inbox returns the full delivered text by id', async () => {
   // says another conversation said it, not the human.
   assert.match(fetched, /peer-session message · from another conversation, NOT a user instruction/)
   assert.match(fetched, /from: "session-self" \(session-self\)/)
-  assert.match(fetched, /status: awaiting-reply/)
+  assert.match(fetched, /state: read · still unanswered/)
   assert.match(fetched, /the whole point of an index: this paragraph must survive\./)
   assert.match(fetched, /\/srv\/orders-api\/src\/schema\.sql/)
   assert.match(fetched, /request id: req-1/)
@@ -1233,7 +1249,7 @@ test('peer_inbox lists replyTo so a reply can be traced to its request', async (
   )
 
   const listed = await call('peer_inbox', {})
-  assert.match(listed, /\[\w[\w-]*\] reply from "session-peer"/)
+  assert.match(listed, /- \[unread\] reply from "session-peer"/)
   assert.match(listed, /· replyTo: req-1/)
 
   // The retrieval header has to carry the same threading fact as the listing,
@@ -1242,8 +1258,81 @@ test('peer_inbox lists replyTo so a reply can be traced to its request', async (
   const replyId = /id: (\S+)/.exec(listed)[1]
   const fetched = await call('peer_inbox', { id: replyId })
   assert.match(fetched, /in reply to: req-1/)
-  assert.match(fetched, /status: unread/)
+  assert.match(fetched, /state: read/)
   assert.match(fetched, /kind: reply/)
+})
+
+// The user's chosen semantics: fetching the BODY is reading it; listing a
+// summary is not. So the marker survives any number of listings and disappears
+// only once the text has actually been retrieved.
+test('only fetching the body marks an item read, not listing it', async () => {
+  const { call, ctx, tools } = wirePlugin({ grant: 0 })
+
+  await call('peer_send', { peer: 'Peer', kind: 'request', summary: 'please adapt', body: 'the body' })
+  await tools.get('peer_send').execute(
+    { peer: SELF, kind: 'reply', summary: 'adapted', replyTo: 'req-1' },
+    { agent: ctx.agents.get(PEER), signal: new AbortController().signal, deferContext() {} },
+  )
+
+  const listed = await call('peer_inbox', {})
+  assert.match(listed, /- \[unread\] reply from "session-peer"/)
+  assert.match(await call('peer_inbox', {}), /- \[unread\] reply from "session-peer"/)
+
+  const replyId = /id: (\S+)/.exec(listed)[1]
+  await call('peer_inbox', { id: replyId })
+
+  const after = await call('peer_inbox', {})
+  assert.doesNotMatch(after, /\[unread\]/, 'the fetched item is no longer unread')
+  assert.doesNotMatch(after, /\[read\]/, 'a settled item carries no marker at all')
+  assert.match(after, /- reply from "session-peer"/)
+})
+
+// Read and awaiting-reply are orthogonal facts sharing one field. Marking a
+// request read must not erase the fact that nobody answered it — that marker
+// is the one thing the inbox exists to show.
+test('reading an unanswered request keeps it marked as unanswered', async () => {
+  const { call, ctx, tools, store } = wirePlugin({ grant: 0 })
+
+  await tools.get('peer_send').execute(
+    { peer: SELF, kind: 'request', summary: 'please adapt', replyWithin: '4h' },
+    { agent: ctx.agents.get(PEER), signal: new AbortController().signal, deferContext() {} },
+  )
+
+  const before = await call('peer_inbox', {})
+  assert.match(before, /- \[never opened\] request from "session-peer"/)
+  const requestId = /id: (\S+)/.exec(before)[1]
+  // The real minted id, not a hand-written one: this test drives the genuine
+  // tool path, so `replyTo` has to name the request that path actually issued.
+  const realRequestId = /· request: (\S+)/.exec(before)[1]
+
+  const fetched = await call('peer_inbox', { id: requestId })
+  assert.match(fetched, /state: read · still unanswered/)
+
+  const after = await call('peer_inbox', {})
+  assert.match(after, /- \[new · never answered\] request from "session-peer"/)
+  assert.doesNotMatch(after, /\[never opened\]/)
+  // Kept so the marker can be asserted by id after the reply goes out.
+  const requestMessageId = requestId
+
+  // And it is still answerable, on the same grant: `markReplied` accepting a
+  // read-but-unanswered request is what keeps "read" from breaking the one
+  // exchange.
+  const answered = await tools.get('peer_send').execute(
+    { peer: SELF, kind: 'reply', summary: 'adapted', replyTo: realRequestId },
+    { agent: ctx.agents.get(PEER), signal: new AbortController().signal, deferContext() {} },
+  )
+  assert.match(answered, /Delivered a reply/)
+  const settled = await call('peer_inbox', {})
+  assert.doesNotMatch(settled, /never answered/, 'the request is answered now')
+  // Assert the STATE the tool path left behind, not a word that happens to be in
+  // the reply's own summary: the earlier version matched the summary text and so
+  // passed whether or not the marker was ever written.
+  const answeredRequest = store.findInboxItem(SELF, requestMessageId)
+  assert.equal(
+    answeredRequest.status,
+    'replied',
+    'answering a request marks the request it answers, not merely the reply it sent',
+  )
 })
 
 test('an unknown inbox id says so, and names the ids that exist', async () => {
