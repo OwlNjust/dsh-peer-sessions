@@ -11,4 +11,10 @@ node_modules/
 # It holds proxy ports, UNC paths and account names — nothing that may be
 # published. The public handover doc points to it by name only.
 MAINTENANCE-NOTES.md
+
+# Scratch notes for someone mid-task on this machine. Not documentation, and
+# not for publication; a live peer conversation pointed out that they were
+# one `git add -A` away from being committed.
+*.scratch.md
+VERIFY-*.md
 .DS_Store

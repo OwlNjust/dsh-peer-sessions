@@ -1235,6 +1235,15 @@ test('peer_inbox lists replyTo so a reply can be traced to its request', async (
   const listed = await call('peer_inbox', {})
   assert.match(listed, /\[\w[\w-]*\] reply from "session-peer"/)
   assert.match(listed, /· replyTo: req-1/)
+
+  // The retrieval header has to carry the same threading fact as the listing,
+  // or a reply read in full loses the request it answers — the reason the
+  // listing gap was worth closing in the first place.
+  const replyId = /id: (\S+)/.exec(listed)[1]
+  const fetched = await call('peer_inbox', { id: replyId })
+  assert.match(fetched, /in reply to: req-1/)
+  assert.match(fetched, /status: unread/)
+  assert.match(fetched, /kind: reply/)
 })
 
 test('an unknown inbox id says so, and names the ids that exist', async () => {

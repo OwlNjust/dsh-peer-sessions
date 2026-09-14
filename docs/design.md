@@ -303,13 +303,16 @@ peer 消息**不能**：批准任何东西、修改任何权限、发起新的 p
 | **其他会话可见** | 在一个新建对话里 `/peers` 可用且显示自己的（空）通道状态；`/peer progress <本对话标题>` 读到本对话的状态、目录、17 轮与最近三轮摘要；`peer_list` 的列表随之从 16 变 17，说明新建对话也在集合里 |
 | **归档即时拒绝** | 归档该对端后它**立刻从列表中消失**（17 → 16），按名字投递给它被拒绝、未发送任何内容。这条同时证明 H1.1（投递前重读）与 H1.2（不缓存） |
 | **子代理拿不到授权** | 探针子代理报告 4 个 `peer_*` 工具**全部可见**（没有任何 preset 配置 `toolFilter`，所以全局工具被完整继承），但 `peer_send` 被 `callerGuard` 拒绝：*"only a top-level conversation can hold a peer channel…"*。**没有弹出任何卡片**——`isRuntimeRoot` 先返回 false，`userQuestions.ask` 从未被调用，因此不会出现契约警告的"永久阻塞" |
+| **收件箱按 id 取回正文**（M2） | 真机：对端回了一条 `reply`，列表是 `Peer inbox (1 item…)` + `- [unread] reply from "…" · 0 min ago` + `id: pm-1-mu1en5e4 · replyTo: req-1-mu1em7ux` + 一行摘要——**正文没有被倾倒进列表**。`peer_inbox(id:"pm-1-mu1en5e4")` 返回完整投递正文：取回头两行是 `Message … · channel pc-1` 与 `Delivered … · status: unread · in reply to: req-1-mu1em7ux`，其后**逐字节等于**收到的那条 relay 消息（来源抬头、`from:`、`channel:`、`answering request:`、正文三行全部一致）。多行 body 未被截断 |
+| **未知 id 具名拒绝**（M2） | `peer_inbox(id:"pm-does-not-exist")` → `No inbox message with id "pm-does-not-exist". Known ids, newest first: pm-1-mu1en5e4.` —— 具名说明，且列出**确实存在**的 id（收件箱为空时说的是"空"，不是空列表） |
+| **重启后新模块生效的判据** | 重启前 `peer_inbox(id:"pm-probe-does-not-exist")` 返回 `Peer inbox is empty.`（旧实现根本不看 `id`）；重启后同一调用返回 `No inbox message with id …`。新实现在给了 id 时**不可能**说出旧回答，所以这是一个确定的"代码是否已加载"探针 |
 
 > 关于上表最后一行：本插件的子代理安全性来自**代码守卫**，不是"工具不存在"。这是有意的（D4：无授权时工具返回说明而非报错），但也意味着若 `isRuntimeRoot` 判断出错，工具就会落到子代理手里。守卫因此是承重件，不是装饰。
 
 ### 仍未在生产中验证的部分
 
-- `peer_inbox` 的**按 id 取回正文**与 **`replyTo` 摘要**：单元测试已覆盖（含"归档的正文与投递的正文逐字节相同"），但尚未在重启后的真机上看到实际输出。
 - `peer_inbox` 的**已读推进**：目前没有把条目标为已读的入口，回复会一直显示 `[unread]`（属 M2，语义待定）。
+  **真机观察（供定语义）**：那条回复在"列表看过一次 + 按 id 取过全文"之后，**仍然是 `[unread]`**，且 `peer_inbox` 的返回值本身不改变状态——也就是说今天没有任何一条路径会让它变成"已读"，这不是 bug 而是缺入口。
 
 ## 13. 里程碑与进度
 
@@ -325,7 +328,7 @@ peer 消息**不能**：批准任何东西、修改任何权限、发起新的 p
   实现方式：投递时把**跨通道的那份完整正文**（含来源抬头，与收到的消息**同一份字符串**）存进收件箱条目，`peer_inbox({ id })` 取回它。存在正文而不是摘要的拼接，是为了让"归档的那份"与"投递的那份"**不可能漂移**；来源抬头随正文一起回来，则是为了让很久之后的一次取回**仍然写明这不是用户指令**（H2 的延寿，而不是只在新消息上生效）。
 - ~~`peer_inbox` 摘要里补上 `replyTo`~~ —— **已实现**（正文里本来就有，摘要里漏了）。
 - `peer_inbox` 的**已读推进**：目前没有入口把条目标为已读，回复会一直显示 `[unread]`。**语义待定**——用户要求先在真机看到实际输出（列表形态、状态标注）再决定"看一眼算读"还是"取回正文才算读"。`store.markRead` 已就位但尚无调用方。
-- `peer_progress` 深化：`plan`、`contextPressure` 等投影的渲染
+- `peer_progress` 深化：`plan`、`contextPressure` 等投影的渲染。**真机已证实这些键确实存在**（2026-09-14 重启后的那次 `peer_progress`）："其他存在的投影"一行列出 `tokenUsage, contextPressure, contextBreakdown, sessionStats, agentPreset, subagentCatalog, subagentTiming, subagent, modelSelection, sessionListMetadata, imageLimits, plan`。所以第 5 项是"渲染已有数据"，不是"先找数据"；但渲染前仍要先确认 `plan` 的内容边界（C2 禁止对话原文）。
 - 环路防护完整版：每对速率上限、跳数上限、请求超时后的主动通知
 
 ### M3 · 待做
