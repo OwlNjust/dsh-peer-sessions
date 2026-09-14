@@ -12,7 +12,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { classify, listAddressable, resolveTarget, labelOf } from '../lib/addressable.js'
+import { classify, listAddressable, resolveTarget, labelOf, stripInvisible, displayToken } from '../lib/addressable.js'
 import { PeerStore, pairKey, CHANNEL_BUDGET } from '../lib/store.js'
 import { buildPeerMessage, buildDeliveryNotice, PEER_KIND } from '../lib/messages.js'
 import { translator, resolveLocale, normalizeLocale, DEFAULT_LOCALE } from '../lib/i18n.js'
@@ -37,6 +37,31 @@ function summary(sessionId, extra = {}) {
     projections: {},
     ...extra,
   }
+}
+
+/** One session summary carrying a real title projection. */
+function titled(sessionId, title) {
+  return summary(sessionId, { projections: { asOfSeq: 0, values: { title } } })
+}
+
+/**
+ * Register the commands against a capturing fake and return their handlers, so
+ * a test can drive exactly what a typed command line produces.
+ * @param core - the peer core to register against.
+ * @returns handlers keyed by command name.
+ */
+function captureCommands(core) {
+  const handlers = {}
+  registerCommands(
+    {
+      register(definition) {
+        handlers[definition.name] = definition.handler
+        return () => {}
+      },
+    },
+    core,
+  )
+  return handlers
 }
 
 /** A fake agent that records what was delivered to it. */
@@ -234,6 +259,62 @@ test('resolveTarget never guesses when several titles match', () => {
 test('resolveTarget excludes the asking session itself', () => {
   const entries = [{ sessionId: 'self', title: 'me', label: 'me' }]
   assert.equal(resolveTarget(entries, 'me', 'self').kind, 'none')
+})
+
+// ------------------------------------------------------------ input hygiene
+
+// Pasted text carries zero-width characters that are invisible and not matched
+// by `\s`. Observed live: a pasted `/peer connect …` answered
+// `unknown subcommand "connect"` while listing `connect` as available.
+test('stripInvisible removes zero-width and bidi-control characters', () => {
+  assert.equal(stripInvisible('con\u200Bnect'), 'connect')
+  assert.equal(stripInvisible('a\uFEFFb'), 'ab')
+  assert.equal(stripInvisible('\u202Eabc'), 'abc')
+  assert.equal(stripInvisible('connect'), 'connect')
+  assert.equal(stripInvisible(' 连接 '), ' 连接 ')
+  assert.equal(stripInvisible(null), '')
+})
+
+test('displayToken shows code points only when a reader could be misled', () => {
+  assert.equal(displayToken('connect'), 'connect')
+  assert.equal(displayToken(''), '(empty)')
+  // A Cyrillic homoglyph looks like "connect" but is not.
+  assert.match(displayToken('c\u043Ennect'), /U\+043E/)
+  assert.match(displayToken('con\u200Bnect'), /U\+200B/)
+})
+
+test('resolveTarget matches a title pasted with a zero-width character', () => {
+  const entries = [{ sessionId: PEER, title: 'CodeTools', label: 'CodeTools' }]
+  assert.equal(resolveTarget(entries, 'Code\u200BTools', SELF).entry.sessionId, PEER)
+})
+
+test('a pasted subcommand carrying a zero-width character still parses', async () => {
+  const ctx = fakeCtx({ items: [titled(SELF, 'Me'), titled(PEER, 'CodeTools')], agentIds: [SELF, PEER] })
+  const core = new PeerCore(ctx, undefined, translator('zh'))
+  const handlers = captureCommands(core)
+  // Exactly what the live failure looked like: the space after `connect` had
+  // been pasted as text containing an invisible character.
+  const result = await handlers.peer({
+    agent: ctx.agents.get(SELF),
+    rawInput: ' connect\u200B CodeTools session',
+    signal: new AbortController().signal,
+  })
+  assert.equal(result.kind, 'success')
+  assert.equal(core.store.between(SELF, PEER).tier, 'session')
+})
+
+test('a genuinely unrecognizable subcommand is reported with its code points', async () => {
+  const ctx = fakeCtx({ items: [titled(SELF, 'Me'), titled(PEER, 'CodeTools')], agentIds: [SELF, PEER] })
+  const core = new PeerCore(ctx, undefined, translator('zh'))
+  const handlers = captureCommands(core)
+  // Cyrillic "о": a homoglyph that renders as `connect`.
+  const result = await handlers.peer({
+    agent: ctx.agents.get(SELF),
+    rawInput: ' c\u043Ennect CodeTools session',
+    signal: new AbortController().signal,
+  })
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /U\+043E/)
 })
 
 // --------------------------------------------------------------------- store
@@ -770,7 +851,6 @@ test('both shipped locales cover every key the plugin asks for', () => {
 test('the consent card is asked in the client language and still maps back', async () => {
   // The question names the peer by the label resolved from the VISIBLE set, not
   // by whatever the caller passed, so give the fake peer a real title.
-  const titled = (id, title) => summary(id, { projections: { asOfSeq: 0, values: { title } } })
 
   const zh = fakeCtx({ items: [titled(SELF, '本对话'), titled(PEER, '对端')], agentIds: [SELF, PEER], grant: 1 })
   const zhCore = new PeerCore(zh, undefined, translator('zh'))
