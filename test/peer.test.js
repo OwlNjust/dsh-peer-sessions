@@ -271,6 +271,57 @@ test('resolveTarget excludes the asking session itself', () => {
   assert.equal(resolveTarget(entries, 'me', 'self').kind, 'none')
 })
 
+// The first live run of this path answered a request for a just-archived
+// conversation with the entire fifteen-line list. The reason was available all
+// along: the session sits in the hidden set, with a code that says why.
+test('an archived target is refused by name, not with the whole list', async () => {
+  const ctx = fakeCtx({
+    items: [titled(SELF, 'Me'), titled('session-gone', 'CodeTools')],
+    archived: ['session-gone'],
+  })
+  const core = new PeerCore(ctx, undefined, translator('zh'))
+  await assert.rejects(
+    () => core.resolveOrRefuse('CodeTools', SELF, undefined),
+    (error) => {
+      assert.match(error.message, /「CodeTools」已归档/)
+      assert.doesNotMatch(error.message, /当前可见的会话/, 'a named reason beats a wall of candidates')
+      return true
+    },
+  )
+})
+
+test('a subagent session is refused with its own reason', async () => {
+  const ctx = fakeCtx({
+    items: [
+      titled(SELF, 'Me'),
+      summary('session-sub', { origin: 'subagent', projections: { asOfSeq: 0, values: { title: 'helper' } } }),
+    ],
+  })
+  const core = new PeerCore(ctx, undefined, translator('zh'))
+  await assert.rejects(
+    () => core.resolveOrRefuse('helper', SELF, undefined),
+    (error) => {
+      assert.match(error.message, /「helper」是子代理会话/)
+      return true
+    },
+  )
+})
+
+test('a refusal with many candidates lists a bounded number of them', async () => {
+  const many = Array.from({ length: 12 }, (_unused, index) => titled(`session-${index}`, `topic ${index}`))
+  const ctx = fakeCtx({ items: [titled(SELF, 'Me'), ...many] })
+  const core = new PeerCore(ctx, undefined, translator('zh'))
+  await assert.rejects(
+    () => core.resolveOrRefuse('nothing-like-this', SELF, undefined),
+    (error) => {
+      assert.match(error.message, /当前可见的会话/)
+      assert.match(error.message, /另有 4 个/, 'twelve candidates minus the eight shown')
+      assert.doesNotMatch(error.message, /topic 11/, 'the ninth onward is summarised, not listed')
+      return true
+    },
+  )
+})
+
 // ------------------------------------------------------------ input hygiene
 
 // Pasted text carries zero-width characters that are invisible and not matched
@@ -866,6 +917,10 @@ test('both shipped locales cover every key the plugin asks for', () => {
     'resolve.many',
     'resolve.noneWithCandidates',
     'resolve.noneAlone',
+    'resolve.hidden.archived',
+    'resolve.hidden.subagent',
+    'resolve.hidden.blank',
+    'resolve.moreCandidates',
     'resolve.selfNotVisible',
     'resolve.peerNotVisible',
     'budget.spent',
