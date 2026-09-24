@@ -116,10 +116,14 @@ retrying it in the same turn only wastes the turn.
 |---|---|---|
 | Rate per pair | 30 deliveries / 60s, per channel | Slow down, or batch several messages into one. Retrying immediately fails again. |
 | Total per pair | 200 on a channel (`once` buys 1) | The channel is used up. Tell the user; a new one needs their consent. |
-| Hop count | 3 | You are the third conversation to handle a message relayed along a chain. Do **not** relay it onward or bounce it back — that is the loop the ceiling exists to stop. |
+| Relay depth | 3 | How far a message has been RELAYED: passed from one conversation to a third, then a fourth. **Replying to the conversation that wrote to you does not count** — ordinary back-and-forth never hits this. Do **not** relay a peer's message onward; that is the propagation the ceiling exists to stop. |
 
-Each delivered message carries a `hop:` line. On a message you send at the user's own request
-it is `1`; answering a peer's message is one more than the hop you received.
+Each delivered message carries a `hop:` line, and `peer_list` shows `hop=N/3` per channel. It counts
+**relays, not replies**: answering whoever just wrote to you keeps the same hop, and it is `1` for a
+message you send on your own initiative. It only rises when a message is handed to a DIFFERENT
+conversation. Nothing resets it — not a new message, not another kind, not more user authorization —
+so if a hop refusal blocks something that matters, ask the user to relay it or use shared files
+rather than trying another send.
 
 **Answering someone else's `request` is how you start a chain — do it once and stop.** If a
 peer's message merely informs you, do not answer with another message unless it asked for one.

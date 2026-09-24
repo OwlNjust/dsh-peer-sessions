@@ -1220,39 +1220,48 @@ test('every command definition registers with a name and a handler', () => {
 
 // ------------------------------------------------- loop protection (delivery)
 
-test('a delivery carries a hop, and the chain is refused past the limit', async () => {
+// HOPS COUNT RELAYS, NOT REPLIES. This test used to assert the opposite — that
+// each reply deepened the chain — and that rule was the bug a live report hit:
+// four ordinary exchanges between two peers walked 1,2,3,4 and locked the pair
+// out permanently, with `peer_list` still advertising healthy message quotas.
+test('replying to the other side does not deepen the chain', async () => {
   const ctx = fakeCtx({ items: [summary(SELF), summary(PEER)], agentIds: [SELF, PEER], grant: 1 })
   const core = new PeerCore(ctx)
   const entry = (id, label) => ({ sessionId: id, label, running: true, projections: {} })
 
-  // Turn by turn: A opens, B answers, A answers back, B answers again. The
-  // fourth transmission is hop 4, one past the cap, and must be refused — so
-  // the test expects that call to throw instead of growing the list.
-  const order = [[SELF, PEER], [PEER, SELF], [SELF, PEER], [PEER, SELF]]
-  const hops = []
-  for (let i = 0; i < order.length; i += 1) {
-    const [from, to] = order[i]
-    const payload = i === 0 ? { kind: 'request', summary: 'hop 1', requestId: 'req-chain' } : { kind: 'reply', summary: `hop ${i + 1}`, replyTo: 'req-chain' }
-    const send = () =>
-      core.deliver({
-        selfAgent: ctx.agents.get(from),
-        selfLabel: from,
-        peerEntry: entry(to, to),
-        payload,
-      })
-    if (i < HOP_LIMIT) {
-      const result = await send()
-      hops.push(result.hop)
-    } else {
-      await assert.rejects(
-        send,
-        // Locale-agnostic: the copy follows the client language, so match either.
-        (error) => error instanceof PeerRefusal && /hop|跳/.test(error.message),
-        'a chain beyond the cap is refused rather than delivered',
-      )
-    }
+  // Six round trips between the same two conversations, well past HOP_LIMIT.
+  for (let i = 0; i < 6; i += 1) {
+    const from = i % 2 === 0 ? SELF : PEER
+    const to = i % 2 === 0 ? PEER : SELF
+    const result = await core.deliver({
+      selfAgent: ctx.agents.get(from),
+      selfLabel: from,
+      peerEntry: entry(to, to),
+      payload: { kind: 'message', summary: `exchange ${i + 1}` },
+    })
+    assert.equal(result.hop, 1, `exchange ${i + 1} stays on the first hop`)
   }
-  assert.deepEqual(hops, [1, 2, 3], 'each answer deepens the chain by one')
+})
+
+// A chain deepens only when a message is handed to a DIFFERENT conversation,
+// which is the propagation this ceiling exists to bound.
+test('relaying to a third conversation deepens the chain, and the cap still bites', () => {
+  const store = new PeerStore()
+  // A fresh message, sent on the user's own initiative.
+  assert.equal(store.nextHop('a', 'b'), 1)
+  // b is answering a, so its reply continues the same chain.
+  store.noteInboundHop('b', 1, 'a')
+  assert.equal(store.nextHop('b', 'a'), 1, 'a reply is not a relay')
+  // b now hands it to c: that IS a relay.
+  assert.equal(store.nextHop('b', 'c'), 2)
+  store.noteInboundHop('c', 2, 'b')
+  assert.equal(store.nextHop('c', 'd'), HOP_LIMIT)
+  store.noteInboundHop('d', HOP_LIMIT, 'c')
+  assert.equal(store.nextHop('d', 'e'), HOP_LIMIT + 1, 'one relay too far is what the guard refuses')
+  // And a stale mark is not a chain: past the window this is a fresh message.
+  store.noteInboundHop('f', HOP_LIMIT, 'e')
+  store.inboundHops.set('f', { hop: HOP_LIMIT, from: 'e', at: Date.now() - 16 * 60_000 })
+  assert.equal(store.nextHop('f', 'g'), 1)
 })
 
 test('the delivery rate limit refuses without spending the budget', async () => {
@@ -1793,6 +1802,46 @@ test('a channel to an archived peer can still be revoked', async () => {
   const revoked = await handlers.peer({ agent: { id: SELF }, rawInput: 'revoke Peer', signal: undefined })
   assert.match(revoked.text, /revoked|断开/)
   assert.equal(core.store.between(SELF, PEER), undefined, 'the channel is gone')
+})
+
+// A live report was locked out by the hop ceiling while `peer_list` advertised
+// healthy quotas — because it showed the MESSAGE quota and the two axes were
+// never named. Both are printed now, each with its unit.
+test('peer_list names both axes: message quota and relay depth', async () => {
+  const { call } = wirePlugin({ grant: 1, revive: true })
+  await call('peer_send', { peer: PEER, kind: 'message', summary: 'opener' })
+  const listed = await call('peer_list')
+  assert.match(listed, /remaining=\d+ \(messages\)/, 'the message quota is labelled as such')
+  assert.match(listed, /hop=\d+\/\d+ \(relay depth, \d+ left\)/, 'and so is the relay depth')
+})
+
+// The refusal must say what it counts, that nothing resets it, and what to do
+// instead. The old copy ("peer messages may not relay onward indefinitely") read
+// as "try another way": a user asked for more quota and retried, and both sides
+// burned a turn finding out that no sending pattern helps.
+test('a hop refusal explains itself and offers a way forward', async () => {
+  const { call, ctx, store } = wirePlugin({ grant: 1, revive: true })
+  // Establish the channel first: the refusal must be the hop ceiling, not a
+  // missing channel.
+  const opener = await call('peer_send', { peer: PEER, kind: 'message', summary: 'opener' })
+  assert.match(opener, /Delivered/)
+  // Now a relay has arrived from a THIRD conversation at the cap, so handing
+  // this on to the peer would be one relay too far.
+  store.noteInboundHop(SELF, HOP_LIMIT, 'session-third')
+  const refused = await call('peer_send', { peer: PEER, kind: 'message', summary: 'relay onward' })
+  // Locale-agnostic on purpose: a PeerCore built directly speaks the default
+  // (Simplified Chinese), so asserting English copy here fails for a reason
+  // that has nothing to do with the refusal. What matters is that the refusal
+  // is followed by the three facts and the alternative.
+  const help = refused.split('\n\n')[1] ?? ''
+  assert.notEqual(help, '', 'the refusal must carry a second paragraph')
+  assert.match(help, /接力|RELAY|relay/, 'it must say what the ceiling counts')
+  assert.match(help, /回复|Replying|replying/, 'and that replying is not what is counted')
+  assert.match(help, /重置|resets/, 'and that no sending pattern helps')
+  assert.match(help, /授权|authorization/, 'and that asking for consent again will not help')
+  assert.match(help, /代为转达|relay it|文件/.source ? /代为转达|relay it/ : /x/, 'and offer a real alternative')
+  // Refused means refused: nothing left this conversation.
+  assert.equal(ctx.received.length, 1, 'only the opener was ever delivered')
 })
 
 test('an unknown inbox id says so, and names the ids that exist', async () => {

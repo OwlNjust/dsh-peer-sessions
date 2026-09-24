@@ -17,4 +17,11 @@ MAINTENANCE-NOTES.md
 # one `git add -A` away from being committed.
 *.scratch.md
 VERIFY-*.md
+
+# Incoming defect reports. They quote REAL conversation titles and session ids
+# from whichever conversations filed them, so they must never be committed —
+# `MAINTENANCE.md` carries the sanitized findings and the fix. Confirmed the
+# hard way: one was swept in by `git add -A` and had to be removed before the
+# tag was pushed.
+*问题报告*.md
 .DS_Store
