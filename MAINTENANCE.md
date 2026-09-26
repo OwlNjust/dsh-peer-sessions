@@ -384,6 +384,37 @@ Windows 侧显示的"已修改"是视错觉——见坑 13。
 5. 踩到新坑 → **回写本文件第六节。这份文档的价值全在这里。**
 6. 提交前 → 跑第九节的敏感信息扫描
 
+## 十一之一、宿主升级：为什么"能跑"不等于"接对了"
+
+**症状**：把 DSH 从 `0.1.5-rc.3` 升到 `0.1.7-rc.2` 后，插件**照常工作**（`peer_list` 正常列出会话、地址解析正确）。但一比对就发现：插件加载的是 **0.1.5-rc.3** 的模块，宿主跑的是 **0.1.7-rc.2**。
+
+**根因**：`~/.dsh/profiles/node_modules` 里的 `@deepseek-ai/*` 链到**全局安装**那份（`~/.npm-global/.../dsh/node_modules`），而 npx 启动的宿主用的是**它自己缓存**里那份。两者版本不同，`link-deps.sh` 只认前者，于是**插件的 node_modules 指向了旧实例**。
+
+**这为什么危险**：正是坑 3 警告的身份分裂——`defineTool`、`createUserMessage` 这些"定义类型的包"在插件与宿主手里**是两份**。它此刻不报错（0.1.7 恰好向后兼容），但那是运气，不是保证；一旦哪版改了返回形状或符号，插件就会以旧形状对新宿主。
+
+**修法与教训**：
+- `scripts/link-deps.sh` 改为**优先从 PATH 上的 `dsh` 反推宿主实例**（`readlink -f $(command -v dsh)` → 向上找含 `@deepseek-ai/dsh-tools` 的 `node_modules`），`$DSH_HOME/profiles/node_modules` 只作兜底。现在脚本会打印它选了哪个实例、以及该实例的 `dsh-llm` 版本。
+- **升级宿主后必须重跑 `link-deps.sh`（或 `./install.sh`）并重启 profile**，否则插件可能仍挂在旧实例上。
+- **"插件能跑"不能证明"接对了"**：这次功能全正常，错的是模块身份。**判据要直接看 `readlink -f` 与包版本，不要看行为是否正常。**
+
+### 0.1.7-rc.2 的契约变化（实测逐项比对）
+
+宿主升级要查的不是"有没有报错"，而是**插件依赖的每个契约**。这次逐项比对结果：
+
+| 契约 | 变化 | 影响 |
+|---|---|---|
+| `dsh-llm` / `dsh-tools` **导出符号集合** | **完全一致** | 无 |
+| `sessionController.resolveAgent(sessionId)` | 签名完全相同 | 无 |
+| `sessionController.list(request, signal)` | 签名完全相同 | 无 |
+| `SessionListValue.items` | 仍是 `SessionSummary[]` | 无 |
+| `SessionSummary` | **只新增 `agentAvailable: boolean`**（向后兼容）；插件读的 `sessionId`/`running`/`blank`/`origin`/`cwd`/`updatedAt`/`projections` 全在 | 无 |
+| `userQuestions` | 导出符号无差异 | 无 |
+| `dsh-api-session-controller` 其他 | 移除 `SessionJob`/`SessionQueuedItem`，新增 `ArchivedSessionGate`/`SessionProjectionsValue` 等 | 插件未使用，无影响 |
+
+**顺带发现的可用增强**：新字段 `SessionSummary.agentAvailable` 是宿主的权威信号——"这个会话当前是否持有活 Agent"。插件现在是用 `ctx.agents.get(peerId)` 判活的（坑 7：空闲会话是冷的），**两者语义不同**：`agentAvailable` 反映**权威状态**，`agents.get` 反映**本进程的即时视图**。插件用在"要不要唤醒、要不要再校验"上，当前实现（重读 `agents.get`）是对的，**不要顺手改成 `agentAvailable`**——那会把一个并发正确的判断换成一个可能滞后的快照。这里记下来，是为了让下一个人知道"多了一个字段"不等于"该用它"。
+
+**验证方法**（可复用）：拿新实例**真实跑一遍插件的注册路径**，比读类型定义更硬。做法是建一个探针目录，`node_modules` 软链到新实例、插件目录软链进去，然后 `registerTools` + 参数编译 + `createUserMessage` 全过一遍。本次三项全 PASS。
+
 ## 十一之二、v1.0.0 发布前的审计：它抓到了什么，以及过程本身的教训
 
 第一版正式版之前做了一次全量审计：**两个独立子代理各审一半**（生命周期/状态寿命/并发 vs 边界/不可信输入/错误路径），各自用探针驱真实代码取证。**20 项发现、11 项真 bug，全部已修**，测试 70 → 79。逐项记录在 `docs/design.md` 的「v1.0.0 审计」一节。
