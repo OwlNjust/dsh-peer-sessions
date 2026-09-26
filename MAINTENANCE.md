@@ -394,6 +394,7 @@ Windows 侧显示的"已修改"是视错觉——见坑 13。
 
 **修法与教训**：
 - `scripts/link-deps.sh` 改为**优先从 PATH 上的 `dsh` 反推宿主实例**（`readlink -f $(command -v dsh)` → 向上找含 `@deepseek-ai/dsh-tools` 的 `node_modules`），`$DSH_HOME/profiles/node_modules` 只作兜底。现在脚本会打印它选了哪个实例、以及该实例的 `dsh-llm` 版本。
+- **第一版修法仍不对，而且错得很典型**：它只在每一层找 `$d/node_modules`。这只覆盖 **npx 缓存**布局（`…/_npx/<hash>/node_modules/.bin/dsh`，包就在上一层）；而**全局安装**把 dsh 的依赖**打包在包内部**——`…/lib/node_modules/@deepseek-ai/dsh/node_modules/` ——外层 `node_modules` 里根本没有 `@deepseek-ai/dsh-tools`。于是脚本"找到路径但判定不可用"，静默回退到 `profiles/node_modules`，**看起来成功、其实没选到宿主那份**。现在每层同时检查 `$d/node_modules` 与 `$d/*/node_modules`。**教训**：写"向上搜索"这类逻辑，要拿**实际存在的每种布局**各验一遍；只用你手上那一种布局测过，就等于没测。
 - **升级宿主后必须重跑 `link-deps.sh`（或 `./install.sh`）并重启 profile**，否则插件可能仍挂在旧实例上。
 - **"插件能跑"不能证明"接对了"**：这次功能全正常，错的是模块身份。**判据要直接看 `readlink -f` 与包版本，不要看行为是否正常。**
 

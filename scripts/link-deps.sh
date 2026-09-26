@@ -39,14 +39,32 @@ usable() {
 # The node_modules of the harness `dsh` resolves to right now.
 resolve_from_path() {
   command -v dsh >/dev/null 2>&1 || return 0
-  local bin d
+  local bin d candidate
   bin="$(readlink -f "$(command -v dsh)" 2>/dev/null)" || return 0
   d="$(dirname "${bin}")"
+  # Two layouts have to be handled, and the second is why the first draft of
+  # this was still wrong:
+  #
+  #   npx cache       …/_npx/<hash>/node_modules/.bin/dsh
+  #                   -> …/_npx/<hash>/node_modules      (directly above)
+  #   global install  …/lib/node_modules/@deepseek-ai/dsh/lib/bin.js
+  #                   -> …/@deepseek-ai/dsh/node_modules (BUNDLED INSIDE the dsh
+  #                      package, not in the outer node_modules that holds
+  #                      unrelated world packages)
+  #
+  # so each step up checks both the node_modules at that level and one level of
+  # packages beneath it.
   while [ "${d}" != "/" ]; do
     if usable "${d}/node_modules"; then
       printf '%s\n' "${d}/node_modules"
       return 0
     fi
+    for candidate in "${d}"/*/node_modules; do
+      if usable "${candidate}"; then
+        printf '%s\n' "${candidate}"
+        return 0
+      fi
+    done
     d="$(dirname "${d}")"
   done
 }

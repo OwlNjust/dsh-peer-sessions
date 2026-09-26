@@ -316,6 +316,7 @@ peer 消息**不能**：批准任何东西、修改任何权限、发起新的 p
    方向校验是必需的：只认"由对端发起"的 request，否则一方可以拿自己发过的 request 去解锁另一方的额度。
    卡片文案同步改为 "One exchange — the message and its answer — then the channel is spent"。
 
+| **宿主两处布局都要覆盖**（同一次修复的第二轮） | 第一版 `link-deps.sh` 的"向上搜索"只认 **npx 缓存**布局，而**全局安装**把依赖打包在 `@deepseek-ai/dsh/node_modules/` **内部**，外层 `node_modules` 里没有 `dsh-tools`——脚本于是回退到 `profiles/node_modules`，看似成功却没选到宿主。现在两层都查（`$d/node_modules` 与 `$d/*/node_modules`）。实测：改后插件与宿主 realpath **完全一致** |
 | **宿主升级会悄悄拆散模块实例**（v1.0.2 后实测） | 把 DSH 从 `0.1.5-rc.3` 升到 `0.1.7-rc.2` 后，`link-deps.sh` 指向的 `$DSH_HOME/profiles/node_modules` **仍是旧版本**（它链到全局安装那份），而宿主跑的是 npx 缓存里的新实例：插件加载 `dsh-llm 0.1.5-rc.3`、宿主是 `0.1.7-rc.2`。**正是坑 3 警告的身份分裂**，而且**不报错**——只有比对 `readlink -f` 才看得出来。已修：`link-deps.sh` 改为**优先从 PATH 上的 `dsh` 反推宿主实例**，`profiles/node_modules` 降为兜底 |
 ### v1.0.0 审计（两个独立审查者 + 真机）
 
