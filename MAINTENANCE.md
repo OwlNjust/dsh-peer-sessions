@@ -712,6 +712,18 @@ unwrapExports(exports) {
 
 `z.object({ must: z.string().required() })` 遇到省略的 `config` 会返回 issues → cordis 抛 `ValidationError` → `_reload` 接住、`logger.error`、fiber INACTIVE。本包**不在** `requiredStartupEntryIds` 里，所以启动**只警告**：进程照常起，插件没了。**规矩：`Config` 的每个字段都必须有 `.default(...)`**，且默认值引用 `STORE_DEFAULTS` / `CORE_DEFAULTS`，测试再断言两边相等（否则文档、schema、代码三处会各说各话）。
 
+### 怎么验证一次 `config` 改动（2026-09-30 实测，**不需要重启**）
+
+`patchReload: live` 之下，**按 id 覆盖 `config`** 会被加载器当场应用：`_patchContext` → `fiber.update(options.config, true)` → 重跑 `apply`，于是本包的 `sharedStore.configure(options)` 立即换上新阈值。**增删组合包**（`dsh.profile.bundles`）才是启动清单，必须重启。
+
+不用重启、不唤醒任何对端、也不弹卡的探针：`maxCandidates` 决定"查无此会话"时列几个候选，所以
+
+```
+peer_progress(peer: 'zzz-无此会话')
+```
+
+在补丁层写 `- id: dsh-peer-sessions` + `config: { maxCandidates: 1 }` 前后分别是 **8 行** 与 **1 行 + "……另有 7 个"**。实测 8 → 1 →（删掉覆盖）8，两次都当场生效。（`hopLimit` 只能通过有通道时的 `hop=N/M` 轴观察，没有通道看不到。）
+
 ### 显示元数据：`package.json.meta` 是**死字段**
 
 审核建议加 `"meta": { "title", "description" }`。**在 0.2.0-rc.2 上这没有任何效果**——`readPluginMeta`（`dsh-app-boot/lib/index.js:1969-1999`）从不读 `manifest.meta`，它读：
