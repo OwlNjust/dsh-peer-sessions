@@ -25,6 +25,11 @@ VERIFY-*.md
 # tag was pushed.
 *问题报告*.md
 
+# The marker list for scripts/privacy-scan.sh. It names this machine's users,
+# paths and session titles — the very things the scan exists to keep out — so it
+# can never be committed itself.
+PRIVACY-PATTERNS.txt
+
 # Incoming review/audit documents, same rule. The lasting record is the VERIFIED
 # result in MAINTENANCE.md: this class of document is a set of claims, and the
 # 2026-09-30 one contains two that did not survive verification — the duplicate
