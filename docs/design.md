@@ -253,7 +253,7 @@ peer 消息**不能**：批准任何东西、修改任何权限、发起新的 p
 | **跳数上限** | `HOP_LIMIT = 3` | `store.nextHop(sessionId, toId)` / `noteInboundHop` | 一条**接力链**跨会话传播的深度。**计的是「接力」，不是「回复」** |
 | **请求超时通知** | `replyWithin` 解析成 `dueAt`；默认窗口 `HOP_MEMORY_MS = 15min` 只用于 hop 记忆 | `store.notePending` / `overdueRequests` | 到点后**通知一次**发起方，**绝不自动重发**（B5） |
 
-**表里每个参数都是可配置项，默认值就是表中值**（§12.9）。宿主插件可以用 `Config` 把这类阈值交还给用户，本包从 v1.0.4 起这么做：上表的 `hopLimit` / `rateLimit` / `rateWindowMs` / `channelBudget` / `hopMemoryMs` / `inboxLimit` / `requestMemory` / `pendingGraceMs`，加上两个展示偏好 `maxCandidates` / `recentTurns` / `previewMaxChars`。**默认值只有一份**（`STORE_DEFAULTS` / `CORE_DEFAULTS`），schema 引用它们，测试再断言两边相等——文档里的数字、schema 的默认值、代码实际用的值不会各说各话。
+**表里每个参数都是可配置项，默认值就是表中值**（§12.9）。宿主插件可以用 `Config` 把这类阈值交还给用户，本包从 v1.1.0 起这么做：上表的 `hopLimit` / `rateLimit` / `rateWindowMs` / `channelBudget` / `hopMemoryMs` / `inboxLimit` / `requestMemory` / `pendingGraceMs`，加上两个展示偏好 `maxCandidates` / `recentTurns` / `previewMaxChars`。**默认值只有一份**（`STORE_DEFAULTS` / `CORE_DEFAULTS`），schema 引用它们，测试再断言两边相等——文档里的数字、schema 的默认值、代码实际用的值不会各说各话。
 
 ⚠️ **行的 `config` 是整体替换，不是深合并**：只写 `hopLimit` 的话其余字段由 schema 默认值补齐（这一点有测试），但**同一行的层叠覆盖**是整块替换的，写文档时要提醒用户列全要保留的字段。
 

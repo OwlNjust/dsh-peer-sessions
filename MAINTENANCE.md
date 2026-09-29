@@ -182,7 +182,7 @@ Node 按导入文件的 **realpath** 解析裸说明符。`link:` 安装把本�
 
 症状：声明了 `export const Config`、schema 也对，但 `Config.listConfigs` 永远 `absent`、`apply` 收到的 `config` 永远是 `undefined`——**不报错**。
 
-原因：加载器的 `unwrapExports` 在原生 ESM 上只返回 `exports.default`（原生命名空间没有 `__esModule`，那一层判断直接返回）。所以 `export default {...}` 与 `export const Config` **不能共存**；宿主自己的插件也从不这么写（127 个声明 `Config` 的插件里 0 个这么干）。本包从 v1.0.4 起是**纯具名导出**，并有测试拿真 `unwrapExports` 当 oracle。完整依据见 §十一之七。
+原因：加载器的 `unwrapExports` 在原生 ESM 上只返回 `exports.default`（原生命名空间没有 `__esModule`，那一层判断直接返回）。所以 `export default {...}` 与 `export const Config` **不能共存**；宿主自己的插件也从不这么写（127 个声明 `Config` 的插件里 0 个这么干）。本包从 v1.1.0 起是**纯具名导出**，并有测试拿真 `unwrapExports` 当 oracle。完整依据见 §十一之七。
 
 ## 七、测试哲学：夹具必须对**数据**与**宿主契约**忠实
 
@@ -677,7 +677,7 @@ ctx.on('settings/document-updated', (ns) => { … })
 
 ## 十一之七、`Config`：阈值交还给用户，以及两个**静默失效**的陷阱
 
-**背景**：本包所有上限（跳数、速率、额度、收件箱条数…）原本都是模块常量，用户想改只能改 `lib/store.js`——**升级即被覆盖**；而 README 早就把它们写成"上限"档位。v1.0.4 起用宿主插件通用的 `Config` 交还（`lib/index.js`）。
+**背景**：本包所有上限（跳数、速率、额度、收件箱条数…）原本都是模块常量，用户想改只能改 `lib/store.js`——**升级即被覆盖**；而 README 早就把它们写成"上限"档位。v1.1.0 起用宿主插件通用的 `Config` 交还（`lib/index.js`）。
 
 ### 宿主侧事实（0.2.0-rc.2 实测）
 
