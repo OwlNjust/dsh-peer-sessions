@@ -37,3 +37,4 @@ PRIVACY-PATTERNS.txt
 # was recommended for display text, which the Host never reads (§十一之七).
 *建议*.md
 .DS_Store
+PRIVACY-ACCEPTED.txt

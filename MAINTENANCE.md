@@ -301,13 +301,18 @@ git ls-files -z | xargs -0 grep -In -E 'REPLACE_WITH_YOUR_USERNAME|REPLACE_WITH_
 
 ```sh
 # 模式放在被 gitignore 的文件里，永不入库——"要搜的真实字符串"本身就是泄漏
-printf '%s\n' '本机用户名' '/home/本机用户' '某个真实会话标题' '某个真实工程目录名' > PRIVACY-PATTERNS.txt
-./scripts/privacy-scan.sh          # 依次扫：HEAD 跟踪文件 → 每个提交的内容 → 提交信息与署名
+printf '%s\n' 'REPLACE_WITH_YOUR_USERNAME' 'REPLACE_WITH_YOUR_HOME' \
+  'REPLACE_WITH_A_REAL_SESSION_TITLE' > PRIVACY-PATTERNS.txt
+./scripts/privacy-scan.sh    # 四步：HEAD 跟踪文件 → 每个提交的内容 → 未跟踪未忽略的文件 → 提交信息与署名
 ```
 
 脚本的**模式来源**：`$PRIVACY_PATTERNS`（换行分隔）→ `$PRIVACY_PATTERN_FILE` → `./PRIVACY-PATTERNS.txt`（已 gitignore）。三者都没有时它会**明说"只查了通用形状"**（私网 IP、`/home|/Users|/mnt` 路径、`session-<uuid>`、`sk-` 形状），不让"通过"被误读成"查过了"。
 
-**历史里的命中无法用新提交修掉**：要么重写历史（并如实说明），要么接受它、同时保证 HEAD 干净——脚本退出码 1，并在结尾把这句话再讲一遍。
+**已经公开、且决定不重写历史的标记**放 `PRIVACY-ACCEPTED.txt`（同样 gitignore）：命中**照常列出但不判失败**，否则一个永远红的检查只会被忽略、新的泄漏反而没人看见。默认只按模式汇总（`平级对话通信技能设计 ×14` 这样），要看每一行就 `PRIVACY_VERBOSE=1`。
+
+**历史里的命中无法用新提交修掉**：要么重写历史（并如实说明），要么把它放进接受清单、同时保证 HEAD 干净——脚本退出码 1，并在结尾把这句话再讲一遍。**2026-09-30 的决定是接受**：两处已发布的历史标记列在 `PRIVACY-ACCEPTED.txt` 里（理由见该文件注释），HEAD、新 tag 与 npm 包都不含它们。
+
+**脚本自身也要能被自己的规则检查**：第一版有三处自伤——占位路径 `/home/…` 命中通用规则、模式字面量命中自己、以及模式中 `\\\\` 的转义写错。现在通用规则用 `[\/]` 这种**不会自匹配**的写法，并且**新增脚本/文档后必须重跑一次**（本次就是这样才发现"写教训时把泄漏原文抄进了教训里"）。
 
 **还有一条 `.gitignore` 管不到的发布通道：`package.json` 的 `files` 白名单。** 白名单里写了一个**目录**，npm 就会把该目录里**任何**文件打进 tarball——**包括被 `.gitignore` 忽略的那些**。实测（v1.0.3 待发布时）：`docs/` 在白名单里，于是那份被 `*问题报告*.md` 挡住、**含真实会话标题**的报告**照样进了包**（21 个文件里有它）。已把白名单从 `docs` 收窄成 **`docs/design.md`**——逐个文件写死，以后往 `docs/` 里放什么都不可能搭车。
 
