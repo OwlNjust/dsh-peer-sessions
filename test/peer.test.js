@@ -995,8 +995,9 @@ test('a cold peer raises exactly ONE card, and that card states the wake', async
   })
   assert.equal(result.outcome, 'delivered')
   assert.equal(ctx.asked.length, 1, 'a cold peer must not raise a second card')
-  assert.match(ctx.asked[0].questions[0].detail, /is not running right now/)
+  assert.match(ctx.asked[0].questions[0].detail, /is not running/)
   assert.match(ctx.asked[0].questions[0].detail, /wakes it/)
+  assert.match(ctx.asked[0].questions[0].detail, /costs tokens/)
   assert.equal(ctx.received[0].via, 'followup')
 })
 
@@ -1010,7 +1011,9 @@ test('a running peer raises a card that stays silent about waking', async () => 
     payload: { kind: 'notice', summary: 'hi' },
   })
   assert.equal(ctx.asked.length, 1)
-  assert.doesNotMatch(ctx.asked[0].questions[0].detail, /wakes it/)
+  // No standing description paragraph: `detail` exists only to state a wake that
+  // would otherwise be invisible. A running peer has nothing to disclose.
+  assert.equal(ctx.asked[0].questions[0].detail, undefined)
 })
 
 test('a later delivery on an open channel wakes the peer with no card at all', async () => {
