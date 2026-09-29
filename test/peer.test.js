@@ -1811,12 +1811,17 @@ test('reading an unanswered request keeps it marked as unanswered', async () => 
 test('an overdue request is announced even when the inbox is empty', async () => {
   const { call, tools, ctx } = wirePlugin({ grant: 1 })
 
+  // The window has to be wide enough that the SEND CALL ITSELF cannot outlive
+  // it: the overdue notice is consumed by whichever action first asks for it,
+  // and `peer_send` asks too. It used to be `1ms`, so on a stalled run the send
+  // consumed the notice and the inbox below found nothing to report — a flake
+  // with a real cause, not a slow machine.
   await tools.get('peer_send').execute(
-    { peer: PEER, kind: 'request', summary: 'answer me', replyWithin: '1ms' },
+    { peer: PEER, kind: 'request', summary: 'answer me', replyWithin: '120ms' },
     { agent: ctx.agents.get(SELF), signal: new AbortController().signal, deferContext() {} },
   )
   // `peer_send` announced nothing: the deadline had not passed yet.
-  await new Promise((resolve) => setTimeout(resolve, 12))
+  await new Promise((resolve) => setTimeout(resolve, 220))
 
   const empty = await call('peer_inbox', {})
   assert.match(empty, /Peer inbox is empty/)
