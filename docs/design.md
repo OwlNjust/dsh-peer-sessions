@@ -333,6 +333,8 @@ peer 消息**不能**：批准任何东西、修改任何权限、发起新的 p
    方向校验是必需的：只认"由对端发起"的 request，否则一方可以拿自己发过的 request 去解锁另一方的额度。
    卡片文案同步改为 "One exchange — the message and its answer — then the channel is spent"。
 
+   ⚠️ **由此产生的显示义务（2026-09-30 补）**：这条语义让 `remaining=0` 具有**两种含义**——**中途**（请求已花掉那一次投递、正等它自己的答复，通道仍活着）与**耗尽**。两者若渲染成同一个 `remaining=0`，读的人（模型或人）会先假设"已无额度"，于是一次合法的搭乘投递看起来像配额漏洞：真机上有对端据此提交了"once 档剩余为 0 仍可投递"的误报。因此 `peer_list` 与 `/peers` 必须在 `tier=once && remaining=0` 时**点名它处于中途态**，并写出是哪条 request 花掉的。**显示即契约的一部分**——不能让人从一行状态里推出与实际相反的判据。
+
 | **宿主两处布局都要覆盖**（同一次修复的第二轮） | 第一版 `link-deps.sh` 的"向上搜索"只认 **npx 缓存**布局，而**全局安装**把依赖打包在 `@deepseek-ai/dsh/node_modules/` **内部**，外层 `node_modules` 里没有 `dsh-tools`——脚本于是回退到 `profiles/node_modules`，看似成功却没选到宿主。现在两层都查（`$d/node_modules` 与 `$d/*/node_modules`）。实测：改后插件与宿主 realpath **完全一致** |
 | **宿主升级会悄悄拆散模块实例**（v1.0.2 后实测） | 把 DSH 从 `0.1.5-rc.3` 升到 `0.1.7-rc.2` 后，`link-deps.sh` 指向的 `$DSH_HOME/profiles/node_modules` **仍是旧版本**（它链到全局安装那份），而宿主跑的是 npx 缓存里的新实例：插件加载 `dsh-llm 0.1.5-rc.3`、宿主是 `0.1.7-rc.2`。**正是坑 3 警告的身份分裂**，而且**不报错**——只有比对 `readlink -f` 才看得出来。已修：`link-deps.sh` 改为**优先从 PATH 上的 `dsh` 反推宿主实例**，`profiles/node_modules` 降为兜底 |
 | **0.2.0 要求声明 `dsh.bundle`**（v1.0.3） | dsh 0.2.0 的插件管理器用 `inspectionOf()` 判定 `dsh.bundle` **是否为对象**，否则报 `not-a-bundle` 并**回滚 profile**——而 pnpm 那一步是**成功**的，所以"装上了"与"能当插件管理"是两件事。本包 v1.0.2 及以前没有 `dsh` 字段，从桌面端装必失败。已声明 `"dsh": {"bundle": {"patch": "./cordis.patch.yml"}}`（官方写法：`dsh-base` 用单文件，`dsh-web-app` 用数组）。**离线验证法**：`bundlePatchPaths` → `loadOverlayPatches` 能解析出 insert 行即可，不必真装 |

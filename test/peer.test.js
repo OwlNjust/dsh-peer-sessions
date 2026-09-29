@@ -2343,6 +2343,32 @@ test('peer_list names both axes: message quota and relay depth', async () => {
   assert.match(listed, /hop=\d+\/\d+ \(relay depth, \d+ left\)/, 'and so is the relay depth')
 })
 
+// `once` + remaining=0 is the MID-EXCHANGE state — the request spent the single
+// delivery it bought and its answer may still ride that grant — and it used to
+// print exactly like an exhausted one. A peer read it as a quota hole and filed a
+// report: the code was right, the line was not. Both surfaces now say which state
+// it is, and name the request that spent it.
+test('a once channel at zero says it is mid-exchange, on both surfaces', async () => {
+  const { call } = wirePlugin({ grant: 0, revive: true })
+  const sent = await call('peer_send', { peer: PEER, kind: 'request', summary: 'one exchange', replyWithin: '10m' })
+  const requestId = /request id: (\S+)/.exec(sent)[1]
+
+  const listed = await call('peer_list')
+  assert.match(listed, /remaining=0 \(messages[^)]*its answer still rides this grant\)/)
+  assert.ok(listed.includes(requestId), 'and it names the request that spent it')
+
+  // The command surface says the same thing, in the client language.
+  const ctx = fakeCtx({ items: [titled(SELF, 'Me'), titled(PEER, 'Peer')], agentIds: [SELF, PEER] })
+  const core = new PeerCore(ctx)
+  const handlers = captureCommands(core)
+  await handlers.peer({ agent: ctx.agents.get(SELF), rawInput: 'connect Peer once', signal: undefined })
+  const channel = core.store.channelsFor(SELF)[0]
+  core.store.noteRequest(channel, 'req-cmd', SELF)
+  assert.equal(core.store.spend(channel), true)
+  const listed2 = await handlers.peers({ agent: ctx.agents.get(SELF), signal: undefined })
+  assert.match(listed2.text, /一次档：req-cmd 已花掉这次往来/)
+})
+
 // The refusal must say what it counts, that nothing resets it, and what to do
 // instead. The old copy ("peer messages may not relay onward indefinitely") read
 // as "try another way": a user asked for more quota and retried, and both sides
