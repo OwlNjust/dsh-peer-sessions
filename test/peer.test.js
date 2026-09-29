@@ -739,8 +739,70 @@ test('a card that cannot be shown is unavailable, not declined', async () => {
     payload: { kind: 'notice', summary: 'hi' },
   })
   assert.equal(result.outcome, 'consent-unavailable')
-  assert.equal(result.reason, 'ask-failed', 'an error with no stable code is an unknown surface failure')
+  assert.match(result.reason, /no answerer/, 'the reason must carry what the surface actually threw')
   assert.equal(ctx.received.length, 0, 'nothing may be delivered either way')
+})
+
+// The desktop report that started this: the browser rejects an UNNAMED card with
+// the bare string "ASK_CANCELLED". A Remote hop cannot restore it into a coded
+// error, and the old code read only `error.code` — so the one word that named the
+// cause was thrown away and every delivery on that build reported `ask-failed`.
+test('a bare-string cancellation is named, and is not reported as a refusal', async () => {
+  const ctx = fakeCtx({ items: [summary(SELF), summary(PEER)], agentIds: [SELF, PEER], grant: 1 })
+  ctx.userQuestions.ask = async () => {
+    throw 'ASK_CANCELLED' // eslint-disable-line no-throw-literal -- the client really does this
+  }
+  const core = new PeerCore(ctx)
+  const result = await core.deliver({
+    selfAgent: ctx.agents.get(SELF),
+    selfLabel: 'Me',
+    peerEntry: { sessionId: PEER, label: 'Peer', running: true, projections: {} },
+    payload: { kind: 'notice', summary: 'hi' },
+  })
+  assert.equal(result.outcome, 'consent-unavailable')
+  assert.equal(result.reason, 'ASK_CANCELLED', 'the cancellation value must survive into the report')
+  assert.notEqual(result.outcome, 'declined', 'a cancellation we cannot attribute to a human is not their decision')
+})
+
+// The card is named after the calling tool call, exactly as the official ask tool
+// does. An unnamed card is `dismissal: 'cancel'` on the client: it is cancelled —
+// not hidden — when it loses the editor seat.
+test('a tool-raise question names the card after its tool call', async () => {
+  const { call, ctx } = wirePlugin({ grant: 1 })
+  await call('peer_send', { peer: 'Peer', kind: 'notice', summary: 'hi' }, { callId: 'call_abc123' })
+  assert.deepEqual(ctx.asked[0].wait, { callId: 'call_abc123' })
+
+  // The command path has no call id to give; it must still ask, and must not
+  // invent one. (`isRuntimeRoot` compares identity, so the agent must be the
+  // registry's own instance — a fresh object would be refused.)
+  const cmdCtx = fakeCtx({ items: [summary(SELF), summary(PEER)], agentIds: [SELF, PEER], grant: 1 })
+  const viaCommand = await new PeerCore(cmdCtx).askGrantFor(cmdCtx.agents.get(SELF), 'Peer', undefined)
+  assert.equal(viaCommand.outcome, 'granted')
+  assert.equal('wait' in cmdCtx.asked[0], false, 'a command has no tool call to name the card after')
+})
+
+test('the consent request carries no detail field and states the wake in the question', async () => {
+  const cold = fakeCtx({ items: [summary(SELF), summary(PEER, { running: false })], agentIds: [SELF], revive: true, grant: 1 })
+  await new PeerCore(cold, undefined, translator('en')).deliver({
+    selfAgent: cold.agents.get(SELF),
+    selfLabel: 'Me',
+    peerEntry: { sessionId: PEER, label: 'Peer', running: false, projections: {} },
+    payload: { kind: 'notice', summary: 'hi' },
+  })
+  const coldQuestion = cold.asked[0].questions[0]
+  assert.equal('detail' in coldQuestion, false, 'the official ask tool never sends detail')
+  assert.match(coldQuestion.question, /is not running/)
+  assert.match(coldQuestion.question, /costs tokens/)
+
+  const warm = fakeCtx({ items: [summary(SELF), summary(PEER)], agentIds: [SELF, PEER], grant: 1 })
+  await new PeerCore(warm, undefined, translator('en')).deliver({
+    selfAgent: warm.agents.get(SELF),
+    selfLabel: 'Me',
+    peerEntry: { sessionId: PEER, label: 'Peer', running: true, projections: {} },
+    payload: { kind: 'notice', summary: 'hi' },
+  })
+  const warmQuestion = warm.asked[0].questions[0].question
+  assert.doesNotMatch(warmQuestion, /is not running/, 'a running peer has no wake to disclose')
 })
 
 test('a cancelled card is a decline, because the human closed it', async () => {
@@ -995,9 +1057,9 @@ test('a cold peer raises exactly ONE card, and that card states the wake', async
   })
   assert.equal(result.outcome, 'delivered')
   assert.equal(ctx.asked.length, 1, 'a cold peer must not raise a second card')
-  assert.match(ctx.asked[0].questions[0].detail, /is not running/)
-  assert.match(ctx.asked[0].questions[0].detail, /wakes it/)
-  assert.match(ctx.asked[0].questions[0].detail, /costs tokens/)
+  assert.match(ctx.asked[0].questions[0].question, /is not running/)
+  assert.match(ctx.asked[0].questions[0].question, /wakes it/)
+  assert.match(ctx.asked[0].questions[0].question, /costs tokens/)
   assert.equal(ctx.received[0].via, 'followup')
 })
 
@@ -1930,11 +1992,15 @@ function wirePlugin(options = {}) {
   // deferred context, and the harness admits it as a session row — so a test
   // that wants to know whether the host would accept it must see it.
   const deferred = []
-  const call = (name, args = {}) =>
+  // A real execution context always carries `callId`; the tool path must use it
+  // to name the consent card, so the fake supplies one and a test may override it.
+  const call = (name, args = {}, execOverrides = {}) =>
     tools.get(name).execute(args, {
       agent: ctx.agents.get(SELF),
       signal: new AbortController().signal,
       deferContext: (context) => deferred.push(context),
+      callId: 'call_00_test',
+      ...execOverrides,
     })
   // `store` is exposed so a test can assert the state a path leaves BEHIND, not
   // just what it returned — the difference that matters for read and reply

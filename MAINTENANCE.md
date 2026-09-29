@@ -208,6 +208,32 @@ dsh-client-ui-conversation/lib/client.js
 
 原因：加载器的 `unwrapExports` 在原生 ESM 上只返回 `exports.default`（原生命名空间没有 `__esModule`，那一层判断直接返回）。所以 `export default {...}` 与 `export const Config` **不能共存**；宿主自己的插件也从不这么写（127 个声明 `Config` 的插件里 0 个这么干）。本包从 v1.1.0 起是**纯具名导出**，并有测试拿真 `unwrapExports` 当 oracle。完整依据见 §十一之七。
 
+### 16. 没有 `wait.callId` 的提问卡在客户端是"无名卡"——**关不掉，只会取消**
+
+**症状**（2026-09-30，Windows 桌面版 dsh 0.2.0-rc.2，报告见 `debug/` 后已归档到 §十一之八）：`/peer connect <标题>`（不带档位）与模型侧 `peer_send` **每次**都报"授权卡片没能显示（ask-failed）"，而**同一个会话里原生 `ask_user_question` 的卡片一切正常**。
+
+**根因**：插件调 `ctx.userQuestions.ask({ agent, signal, questions })` 时**没带 `wait: { callId }`**。客户端按 `request.wait?.callId` 决定这张卡的命运：
+
+```js
+// dsh-client-ui-user-questions/lib/client.js
+this.dismissal = callId === void 0 ? "cancel" : "hide";   // :188
+…
+return settlePendingComposer(() => { waterfall.reject("ASK_CANCELLED"); }, …);  // :420
+```
+
+- **有 callId**（官方 `ask_user_question` 总是带，`dsh-tool-ask-user/lib/index.js:197`）：关闭 = `hide`，卡片可从**工具调用行**重新打开，请求继续存活。
+- **没有 callId**：`dismissal = "cancel"`，一旦卡片失去编辑器座位/被收起，就**以裸字符串 `"ASK_CANCELLED"` reject 整个请求**。
+
+而跨 Remote 回来后，`restoreUserQuestionError`（`dsh-user-questions/lib/index.js:443`）只认 `{ name: 'UserQuestionError', message: string, code: string }`——**裸字符串不满足**，于是原样抛出。插件当时只看 `error?.code`，拿到 `undefined` → 报 `ask-failed`，**连那个字符串本身都丢了**。三处修：
+
+1. `lib/tools.js` 把 `exec.callId` 透传（`core.deliver({ …, waitCallId })` → `askGrant` → `wait: { callId }`）；命令路径没有 callId，仍匿名提问。
+2. 失败原因不再只看 `code`：`askFailure()` 依次取 `code` / 裸字符串本身 / `name: message`（有界截断），所以下次报的是 `ASK_CANCELLED` 而不是 `ask-failed`。
+3. 冷对端那句唤醒说明从 `detail` 移进 `question`——官方 ask 工具**从不**传 `detail`（宿主把它与 plan-review intent 配对），少一个形状差异。
+
+**代价（知情）**：带 callId 后**关闭卡片 ≠ 拒绝**，请求继续挂着、工具调用保持等待，直到用户从工具调用行重新打开作答或整轮被中止（`ASK_ABORTED` → `declined`）。这是官方语义，也是让卡片在桌面端可用的必要条件。规格侧见 `docs/design.md` H3。
+
+**排查时的教训**：这次的报告能把根因追到一行，靠的是"官方调用与插件调用的**形状差异**"——遇到"宿主功能对原生可用、对插件不可用"，先把两条请求的字段**逐项比对**，别从行为反推。
+
 ## 七、测试哲学：夹具必须对**数据**与**宿主契约**忠实
 
 这是本项目最贵的一课，出现过三次，每次代价都不小。
@@ -784,6 +810,41 @@ peer_progress(peer: 'zzz-无此会话')
 - 图标：清单**顶层** `icon`（相对路径、SVG/PNG/JPEG/WebP、realpath 后仍在清单目录内、≤256 KiB），读取时就地转成 data URL。
 
 本包已补 `locale/en.json`、`locale/zh.json`、`icon.svg`，并用宿主的 `readPluginMeta` 实测解析出 `{en, zh}` 标题与图标 data URL。测试里钉的是**这些资源的形状与导出**（真 reader 需要包能被"按名字"解析，那是 profile 里才成立的条件）。
+
+## 十一之八、桌面版授权卡片全灭：一次"逐字段比对"定位的宿主契约故障
+
+**来源**：Windows 桌面版 dsh `0.2.0-rc.2`（profile `desktop`）上的另一个对话提交了一份诊断报告 + 证据（本机 `debug/`，已 gitignore）。它报的现象很干脆：`/peer connect <标题>` 与模型侧 `peer_send` **每次**都得到"授权卡片没能显示（ask-failed）"，**而同一个会话里原生 `ask_user_question` 的卡片正常**。
+
+### 我核实到什么程度（不采信报告，逐条查）
+
+| 报告结论 | 我的核对 | 结果 |
+|---|---|---|
+| 官方 blocking 调用总是带 `wait.callId` | 本机安装 `dsh-tool-ask-user/lib/index.js:197` | **成立** |
+| `wait?: { callId, timed? }` 是请求类型的一部分 | `dsh-user-questions/lib/typert.host.js` | **成立** |
+| 客户端 `dismissal = callId === undefined ? "cancel" : "hide"` | `dsh-client-ui-user-questions/lib/client.js:188` | **成立** |
+| 无名卡的取消是裸字符串 reject | 同文件 `:420` `waterfall.reject("ASK_CANCELLED")` | **成立** |
+| 裸字符串无法被还原成带 code 的错误 | `dsh-user-questions/lib/index.js:443`（要求 `{name,message,code}`） | **成立** |
+| 桌面 bundle 与 npm 安装同码 | 逐字节 diff 四个证据文件 | 三个**逐字节相同**；client bundle 差 146 行，但**那三处行为行号一致** |
+| 浏览器里"卡片被 dismiss 的那一瞬间" | 无桌面访问权 | **未验**（报告自己也标了边界） |
+
+### 修法（v1.1.1）
+
+1. **带 `wait: { callId }`**：`peer_send` 的 `exec.callId` 透传到 `askGrant`；命令路径无 callId，仍匿名。
+2. **失败原因不再只看 `code`**：`askFailure()` 取 `code` → 裸字符串本身 → `name: message`，所以同类故障下次直接报 `ASK_CANCELLED`。
+3. **唤醒说明从 `detail` 移进 `question`**：官方 ask 工具从不传 `detail`（宿主把它与 plan-review intent 配对），少一个形状差异。
+
+三条一起做，是因为"缺 wait"与"多 detail"都与观察到的失败**同时相关**（两次尝试都是冷对端），单独归因任何一个都不够；改完两条路径都与官方请求只在**内容**上不同。
+
+### 教训
+
+- **原生可用、插件不可用 → 逐字段比对两条请求**，不要从行为反推。这次能把根因钉到一行，全靠"官方请求与插件请求的唯一形状差异"这个方法。
+- **错误信息的丢失本身就是缺陷**：只看 `error.code` 会把一个能自解释的裸字符串降级成 `ask-failed`。凡 `catch` 到的值形状未知，就要**按可能性依次降级保留**（code → 原文 → name: message）。
+- **未验的部分要写在报告里**：报告作者明确写了"无法观测 dismiss 瞬间，是从代码路径推断"，这让我能判断该修哪三处、以及为什么值得同时修。
+
+### 未做 / 上游问题（记录备查）
+
+- 第三方插件的工具**永远走不了 timed 卡片路径**（`isTimedAskUserQuestionSchema` 要求 `tool.name === 'ask_user_question'`），所以 blocking `ask()` 是唯一的路，而它的可靠性事实上依赖 `wait.callId`——这是一个**未文档化的依赖**，值得反馈 upstream。
+- `dsh-api-remotes` 在转发 scoped waterfall 时若 `request.agent !== carrierKeyOf(this)` 会抛**裸 `TypeError`**（同样无 code）。它也可能被报成"卡片弹不出来"；本次修法让这类错误现在会以 `TypeError: forwarded scoped event …` 的形式出现在 reason 里，可据此区分。
 
 ## 十二、进一步阅读
 

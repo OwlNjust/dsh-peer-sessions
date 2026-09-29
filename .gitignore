@@ -25,6 +25,12 @@ VERIFY-*.md
 # tag was pushed.
 *问题报告*.md
 
+# Incoming debug drops: a defect report plus the Host files extracted from the
+# desktop app's app.asar as evidence. The report quotes real session ids, titles
+# and Windows paths, and the evidence files are third-party source — neither may
+# be published. Findings land in MAINTENANCE.md instead.
+debug/
+
 # The marker list for scripts/privacy-scan.sh. It names this machine's users,
 # paths and session titles — the very things the scan exists to keep out — so it
 # can never be committed itself.
