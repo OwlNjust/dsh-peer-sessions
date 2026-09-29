@@ -147,6 +147,30 @@ Node 按导入文件的 **realpath** 解析裸说明符。`link:` 安装把本�
 
 这是**选定行为**：当前原语下"能被唤醒"与"不进输入区"互斥（`inject` 靠**不唤醒**换取不进输入区）。从安全角度它反而是优点——一条来自别的会话的消息**在执行前可见、可否决**。抬头第一行是让这份可见性保持诚实的补偿。
 
+#### 它到底长在哪（2026-09-30 核实，供下次别再找错文件）
+
+宿主把"下一个回合的收件箱"渲染成**输入区上方的队列条**：
+
+```
+dsh-client-ui-conversation/lib/client.js
+  function QueueDock(...) {
+    const rows = inbox?.["next-turn"] ?? EMPTY_QUEUE   // ← 数据源，按来源 kind 不过滤
+```
+
+所以本插件的消息（`source.kind = 'peer-message'`）**确实会**出现在那里，和用户自己"排队中"的提交（`placement: 'queued'`）混在同一条 strip 里——`QueueDock` 的注释就是这么写的（"one item renders directly; multiple items default to a collapsible count header"）。
+
+> **我曾经核对错一次**：`dsh-client-ui-chat` 里 `inboxSteering = inbox['next-step'].filter(m => m.source.kind === 'user')` 会让 `source.kind === 'user'` 看起来是硬前提，于是我在报告里说"peer 消息理论上不会出现在输入框"。**那是转录流里"可 steer 的子集"**，不是队列条；队列条读的是 `next-turn`，**不看 kind**。找宿主渲染面时，先按投影键（`next-turn`）定位，别按 kind 过滤反推。
+
+队列条上每一项都有动作（`dsh-api-session-controller` 的 `updateQueue`）：
+
+| 动作 | 效果 |
+|---|---|
+| `remove` | 从收件箱删掉——这条 peer 消息**永远不会执行**；循环会发 `agent/inbox/discarded` |
+| `steer` | 提升进**当前**正在跑的回合（仅 `next-turn` 且 agent 正在运行时可用） |
+| `edit` | 只替换 `content`：`{ ...message, content }`——**`source` 原样保留** |
+
+`edit` 那条值得记住：人改完自己的队列后，模型收到的仍是**带 `peer-message` 来源**的消息。这在威胁模型里不算伪造（本会话的人本来就是最高权限者），但意味着"模型看到的那条 peer 消息"可能经过人调整——抬头是**路由标注**，不是内容真伪的证明。规格侧已记录在 `docs/design.md` H2。
+
 ### 12. `silent: true` 与冷对端**互斥**
 
 静默投递的语义是"只添加上下文、不开启回合"，而唤醒正好是它的反面。这种情况**直接拒绝**（`silent-needs-running`），连卡片都不弹——一个自相矛盾的请求不该拿去让人裁决。
