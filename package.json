@@ -24,7 +24,7 @@
     "lib",
     "skill",
     "scripts",
-    "docs",
+    "docs/design.md",
     "cordis.patch.yml",
     "install.sh",
     "uninstall.sh",

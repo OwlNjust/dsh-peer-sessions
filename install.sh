@@ -5,12 +5,15 @@
 #
 # Two things here are deliberate and easy to "fix" wrongly:
 #
-#   * The plugin's node_modules is a symlink to the profile's, because Node
-#     resolves a bare specifier from the importing file's REAL path. A `link:`
-#     install leaves this package outside the profile tree, so without the link
-#     its `@deepseek-ai/dsh-llm` / `@deepseek-ai/dsh-tools` imports do not
-#     resolve. Pointing at the profile also keeps it on the same module
-#     instances the harness already loaded, so there is no second copy.
+#   * The plugin's node_modules is a symlink into the harness deployment,
+#     because Node resolves a bare specifier from the importing file's REAL
+#     path. A `link:` install leaves this package outside the profile tree, so
+#     without the link its `@deepseek-ai/dsh-llm` / `@deepseek-ai/dsh-tools`
+#     imports do not resolve. WHICH deployment is a real question, not a fixed
+#     path: it has to be the one the RUNNING harness uses, so plugin and host
+#     share a single module instance. scripts/link-deps.sh resolves it (and
+#     documents why `$DSH_HOME/profiles/node_modules` alone stopped being the
+#     answer); this script does not decide it a second time.
 #
 #   * The skill is COPIED, never symlinked. The skill provider lists each skill
 #     root with lstat semantics (dsh-fs-local), so a symlinked directory is
@@ -27,7 +30,6 @@ PROFILE="${DSH_PROFILE:-web}"
 DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
 PROFILE_DIR="${DSH_HOME}/profiles/${PROFILE}"
 PATCH_FILE="${PROFILE_DIR}/cordis.patch.yml"
-DEPLOY_NODE_MODULES="${DSH_HOME}/profiles/node_modules"
 ROW_ID="dsh-peer-sessions"
 SKILL_NAME="peer-session"
 SKILL_SRC="${REPO_DIR}/skill/${SKILL_NAME}"
@@ -52,8 +54,14 @@ say ""
 [ -f "${PATCH_FILE}" ] \
   || fail "patch layer not found: ${PATCH_FILE}"
 
-[ -d "${DEPLOY_NODE_MODULES}" ] \
-  || fail "deployment packages not found: ${DEPLOY_NODE_MODULES}"
+# The deployment check that used to live here (`[ -d $DSH_HOME/profiles/
+# node_modules ]`) was a SECOND, weaker copy of a question step 1 already
+# answers — and the guess it encoded ("the profile directory is the harness
+# deployment") is the one that turned out to be wrong after a harness upgrade.
+# It could also refuse a perfectly good install on a machine whose harness is
+# global-only and has no profile-level node_modules at all. Step 1 owns this
+# check now and fails with a precise message naming DSH_DEPLOY_NODE_MODULES;
+# under `set -e` that aborts this script.
 
 # ------------------------------------------------ 1. module resolution link
 # One implementation, in scripts/, because this is the step a newcomer gets

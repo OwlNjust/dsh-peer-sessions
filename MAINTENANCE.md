@@ -33,7 +33,7 @@
 | `lib/store.js` | 通道、授权档位、额度、收件箱（**进程内**，见坑 1） |
 | `lib/commands.js` / `lib/tools.js` | 2 条命令 + 4 个工具 |
 | `lib/i18n.js` | zh/en 文案表、语言解析、插值 |
-| `test/peer.test.js` | 79 项测试（需要依赖链接，见第四节） |
+| `test/peer.test.js` | 全部测试（需要依赖链接，见第四节）——**条数以 `npm test` 末行的 `tests` 为准**，散文里的数字会过期 |
 | `skill/peer-session/SKILL.md` | 给**模型**看的说明书（安装时复制到 `$DSH_HOME/skills/`） |
 | `docs/design.md` | 权威需求规格 + 真机验证表（§12） |
 | `scripts/link-deps.sh` | 把本包 `node_modules` 链到 harness 部署 |
@@ -50,7 +50,7 @@
 
 ```sh
 npm run link     # 一次性，指向本机已安装的 harness
-npm test         # 79 项，不需要启动 harness
+npm test         # 全部条目（写本文时为 82），不需要启动 harness
 ```
 
 **为什么没有 CI**：测试会 `import '@deepseek-ai/dsh-llm'`，用**真实的** `createUserMessage` 验证消息构造，而那个包来自本机已安装的 harness 部署。干净的 clone 里没有它，CI 跑不起来。
@@ -85,7 +85,9 @@ npm test         # 79 项，不需要启动 harness
 
 ### 3. 本包的 `node_modules` 必须是**软链**，不能是真目录
 
-Node 按导入文件的 **realpath** 解析裸说明符。`link:` 安装把本包留在 profile 树之外，所以 `@deepseek-ai/dsh-llm` / `dsh-tools` 解析不到。链到 `$DSH_HOME/profiles/node_modules` 既恢复解析，又让它指向**与宿主同一份 realpath**——同一模块实例，没有第二份副本。
+Node 按导入文件的 **realpath** 解析裸说明符。`link:` 安装把本包留在 profile 树之外，所以 `@deepseek-ai/dsh-llm` / `dsh-tools` 解析不到。软链恢复解析，并让它指向**与宿主同一份 realpath**——同一模块实例，没有第二份副本。
+
+**链到哪一份，由 `scripts/link-deps.sh` 决定，不要照抄成 `$DSH_HOME/profiles/node_modules`。** 这一条早期就是这么写的，而且在 `0.1.5-rc.3` 上**实测为真**——但**升到 `0.1.7-rc.2` 后它变成了假的**：那个目录里的包**仍是旧版本**，宿主却已经是新的，于是"同一份 realpath"这个前提悄悄不成立（详见 §十一之一）。**判据是 `readlink -f` 加包版本，不是"功能看起来正常"。**
 
 **不要改成普通 npm 依赖**：那会在插件与宿主之间制造身份分裂（两份定义了同一类型的包）。
 
@@ -240,6 +242,14 @@ git ls-files -z | xargs -0 grep -In -E 'REPLACE_WITH_YOUR_USERNAME|REPLACE_WITH_
 
 上面这行**本身就是这条规则的示范**：写文档时最容易犯的错，就是把真实路径和用户名当成"要搜的模式"写进公开文档。
 
+**还有一条 `.gitignore` 管不到的发布通道：`package.json` 的 `files` 白名单。** 白名单里写了一个**目录**，npm 就会把该目录里**任何**文件打进 tarball——**包括被 `.gitignore` 忽略的那些**。实测（v1.0.3 待发布时）：`docs/` 在白名单里，于是那份被 `*问题报告*.md` 挡住、**含真实会话标题**的报告**照样进了包**（21 个文件里有它）。已把白名单从 `docs` 收窄成 **`docs/design.md`**——逐个文件写死，以后往 `docs/` 里放什么都不可能搭车。
+
+```sh
+npm pack --dry-run 2>&1 | grep 'npm notice'   # 逐行看清单：报告类文件必须不在其中
+```
+
+**教训**：`git ls-files` 上的扫描**天生看不到这条通道**——那份报告在 git 侧一直是干净的。凡"某类文件绝不能外发"的规则，先问它**经由几条路外发**（git 推送、npm 打包、插件管理器安装），再一条一条验；只验其中一条，得到的是"已检查"的错觉。
+
 **关于语言**：`docs/design.md` 与 `MAINTENANCE.md` 是中文（主要读者的语言），README 是双语的，**代码与代码注释是英文**。新增文案要同时补 `lib/i18n.js` 的 `zh` 和 `en` 两张表——测试里有一条会检查两张表的键完整性，漏键会让界面出现裸标识符。
 
 ## 十、发布（推送）
@@ -377,7 +387,7 @@ Windows 侧显示的"已修改"是视错觉——见坑 13。
 
 ### 一次改动的标准流程
 
-1. `npm run link` → `npm test`（79 项）
+1. `npm run link` → `npm test`（82 项）
 2. 任何涉及真机契约的改动 → **必须真机验一遍**：`./install.sh` + **重启 profile**（坑 1）
 3. 改了文案 → 同时补 `lib/i18n.js` 的 `zh` 与 `en`（有测试检查两张表的键完整性）
 4. 改了行为 → 更新 `docs/design.md` §12 的验证表
@@ -430,11 +440,11 @@ Windows 侧显示的"已修改"是视错觉——见坑 13。
 
 ### 发布前该做的（照抄）
 
-1. `npm test` 全绿（79 项）。
+1. `npm test` 全绿（82 项）。
 2. 两个独立审查（一个人审不出自己写的路径）。
 3. 逐条修 → **每条修复都补回归测试**（没有测试的修复是下一次重构的牺牲品）。
 4. 敏感信息扫描（第九节）。
-5. 版本号与 `files` 白名单核对：`npm pack --dry-run` 看哪些文件真的会进包——**README 引用的 `docs/`、用户要跑的 `install.sh` 都曾在白名单外**。
+5. 版本号与 `files` 白名单核对：`npm pack --dry-run` 看哪些文件真的会进包——**README 引用的 `docs/`、用户要跑的 `install.sh` 都曾在白名单外**；**反向同样要查**：白名单里写**目录**会把被 `.gitignore` 挡住的报告类文件一起打进包（v1.0.3 实测，见第九节），所以白名单尽量逐个文件写。
 6. 打 tag、写发布说明；推送走第十节（本机必须 Windows 侧）。
 
 ## 十一之三、v1.0.1：一次"规格写对了、实现违反了规格"的故障
@@ -510,6 +520,70 @@ pnpm 那一步**是成功的**，失败发生在管理器随后的校验——�
 
 - **版本兼容校验**：安装时会校验插件声明的 **DSH peer 范围**，不兼容需用户显式豁免（存 profile 的 `compatibility.json`；CLI `dsh plugin --profile <p> version-exemptions` / `allow-version … --accept-risk`）。**本包刻意不声明 `peerDependencies`**——免得跨版本升级时反被判"不兼容"。
 - **官方 CLI 拒绝对 `desktop` profile 做插件管理**，桌面端只能用它自己的 UI；桌面端还有**独立状态文件**（Windows 侧），与 WSL 那份互不相干。
+
+## 十一之五、0.2.0-rc.2 复核：抓到一个**从 0.1.7 起就静默失效**的契约（语言跟随）
+
+宿主升到 **0.2.0-rc.2**（npm 的 `next` 标签；`latest` 仍是 `0.1.7-rc.2`）后，按 §十一之一 的方法重做契约复核。**这次把清单扩展到了"插件声明的服务 + 它监听的事件"，于是抓到一个上一轮漏掉的静默故障。**
+
+### 复核为"不变"的部分（证据可复现）
+
+| 契约 | 证据 | 判定 |
+|---|---|---|
+| `dsh-llm` / `dsh-tools` 导出符号集合 | 按绝对路径 `import` 安装版：llm 65 个导出含 `createUserMessage`，tools 22 个含 `defineTool`；**实调** `createUserMessage({text:'probe'})` → `{"text":"probe","role":"user","id":<uuid>}` | 不变 |
+| `sessionController.list` / `resolveAgent` | `dsh-api-session-controller/lib/index.js` 与 `types/index.d.ts:66`；`list` 仍返回 `{items}`（`SessionListValue.items: readonly SessionSummary[]`，`types.d.ts:266`） | 不变 |
+| `SessionSummary` 字段 | `types.d.ts:159-170`：插件读的 `sessionId/updatedAt/running/blank/origin?/cwd?/projections?` 全在，另加 `agentAvailable` | 不变（**仍不要**改用它，理由见 §十一之一） |
+| `agents.get/roots`、`sessions.get`、`sessionTitle.get`、`workspaceRegistry.archivedSessionIds`、`userQuestions.ask`、`commands.register`、`tools.register` | 逐个在安装版的 `lib/index.js` + `types/*.d.ts` 里找到；`agents.get(id)`(`dsh-agent`)、`sessions.get(id)`(`dsh-session`)、`sessionTitle.get(session)`、`archivedSessionIds` getter(`dsh-workspace`)、`userQuestions.ask(request)`、`tools.register(definition)` | 不变 |
+| 真机端到端 | 本机 web 宿主上 `peer_list` 正常返回 13 个可寻址会话、把自己排除、列出 running/not running——**插件确实被加载并跑在 0.2.0-rc.2 上** | 不变 |
+| `dsh.bundle` 解析（§十一之四 的结论） | **实跑** `bundlePatchPaths(pkgDir, manifest.dsh.bundle)` → `["…/cordis.patch.yml"]`；`loadOverlayPatches` → `[{"insert":[{"id":"dsh-peer-sessions","name":"dsh-peer-sessions"}]}]`；`resolveBundleDir(...)` → `<profile>/node_modules/dsh-peer-sessions`（**node_modules 路径，不是 realpath**——§十一之四 那条坑在 0.2.0-rc.2 上依然成立） | 不变 |
+| 版本兼容校验 **不需要豁免** | **实跑** `evaluatePluginCompatibility(manifest, {})` → `undefined`。这验证了"本包刻意不声明 `peerDependencies`"的策略在 0.2.0-rc.2 上确实不会被判不兼容 | 首次实测 |
+
+### 抓到的真缺陷：`settings.get(ns)` 与 `settings/updated` 都已不存在
+
+插件用 `ctx.get('settings')?.get?.(ns)` 读语言、用 `ctx.on('settings/updated', …)` 跟随语言变化。**两者都是可选链/静默订阅**，所以契约消失时不报错，只是功能悄悄降级：
+
+| 宿主版本 | `settings.get(ns)` | 设置事件 |
+|---|---|---|
+| `0.1.5-rc.3` | **有**（`dsh-settings/lib/index.js:388`） | **`settings/updated`** |
+| `0.1.7-rc.2` | **没有**（`types/index.d.ts` 公开方法只剩 `configure/describe/mutate/prepareDocument/replace/update`） | 只剩 `settings/document-updated` |
+| `0.2.0-rc.2`（本机） | 同 0.1.7 | 同 0.1.7 |
+
+**结论**：`resolveLocale` 一直拿到 `undefined` → 永远回退简体中文；那句 `ctx.on` 从未被触发过 → **语言跟随的整段代码是死的**。失效率点是 **0.1.7-rc.2**，跨了两个宿主版本没人发现，因为：
+
+- `?.` 把"契约没了"翻译成"读不到值"，而"读不到值"本来就有合法解释（用户没设过偏好）；
+- 单元测试的**夹具**本身就是旧契约（`settings.get` + `settings/updated`），所以测试一直在测"我以为的宿主"；
+- §十一之一 的复核清单按"重要的那几个包"枚举，**`settings` 因为是"可选读取"而没进清单**——恰好坏的就是它。
+
+### 正确的读法与监听（都已实测核对）
+
+```js
+// 读：describe() 返回每个命名空间一条描述符，活值挂在 value 上。
+// 宿主自己的消费者就是这么读的（dsh-api-session-controller:574-585、
+// dsh-api-settings-controller:472-478：`describe(...).find(ns === …)?.value`）。
+const descriptor = ctx.get('settings')?.describe?.()?.find?.((d) => d?.ns === 'locale')
+
+// 监听：宿主唯一会发的设置事件是 settings/document-updated，回调 (ns, revision)。
+// 宿主侧 emit：dsh-settings/lib/index.js:435,461；类型声明 types/types.d.ts:73。
+ctx.on('settings/document-updated', (ns) => { … })
+```
+
+命名空间确实叫 `locale`：`dsh-web-app` 的组合层里就是 `- id: locale` / `name: '@deepseek-ai/dsh-client-locale'`，而 `dsh-client-locale` 自己也导出 `LOCALE_SETTINGS_NAMESPACE = 'locale'`。
+
+**修法**：`lib/i18n.js` 的 `resolveLocale` 改走 `describe()`；`lib/index.js` 改监听 `settings/document-updated`；`docs/design.md` §9 里**写的也是旧事件名**（规格与实现一起错，所以谁读文档都看不出来）——一并改掉；测试夹具改成真契约，并补两条只提供新契约的回归测试。**护栏能力已实测**：把两处改回旧写法，**3 条测试立刻失败**（含一条原有测试）。
+
+### 教训（比这次修复更通用）
+
+1. **`?.` 会把"契约消失"变成"功能静默降级"，而且降级后的值往往有一个合法解释。** 凡走可选链读的宿主契约，必须有一条测试**只提供新契约**；"旧 API 也在场"不算证据。
+2. **夹具写的 API 就是被测代码的天花板。** 夹具里那个 `settings.get(ns)` 不是"简化"，是**另一个宿主**。§七 的"夹具必须对数据忠实"要扩展到**宿主契约**：夹具要么抄真实签名，要么附上"这是哪一版"的出处。
+3. **复核清单要按"插件声明的服务 + 它监听的事件"枚举，不能按"我觉得重要的那几个"。** `inject: [...]` 与所有 `ctx.on(...)` 的字面量就是清单本身——这次漏的正是清单外的那一项。
+4. **跨版本比对时，`npm pack` 一条命令只能给最后一个包写版本后缀。** `npm pack a b c@0.1.7-rc.2` 里只有 `c` 是 0.1.7，其余拿的是 `latest`——据此会得出"导出集合大幅变化"的假结论（本轮真踩到）。正确做法：`for p in …; do npm pack "@deepseek-ai/$p@$V"; done`，**解包后先断言每个 `package.json` 的 version 等于目标版本**再开始比。
+
+### 仍未做：真机验证（需重启）
+
+按坑 1，loader 的 re-apply **不重新求值模块**，所以这次修复**必须重启 web profile 才生效**。重启后的验收步骤（留给下一次维护或用户）：
+
+1. `./install.sh`，重启 profile；
+2. 把界面语言切成 **English** → `/peer`、`/peers` 的命令描述应立刻变英文（**这次要确认"当场变"，因为热切换路径此前从未生效过**）；
+3. 再切回中文 → 描述应变回中文。
 
 ## 十二、进一步阅读
 

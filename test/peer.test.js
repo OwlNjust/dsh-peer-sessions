@@ -145,7 +145,7 @@ function fakeCtx({
     sessions: { get: () => undefined },
     sessionTitle: { get: () => undefined },
     workspaceRegistry: { archivedSessionIds: archived },
-    settings: { get: (ns) => (ns === 'locale' ? locale : undefined) },
+    settings: { describe: () => [{ ns: 'locale', value: locale }] },
     get(name) {
       if (name === 'settings') return this.settings
       return undefined
@@ -1063,6 +1063,80 @@ test('a settings provider that throws on read falls back instead of breaking', (
     throw new Error('settings exploded')
   }
   assert.equal(resolveLocale(ctx), DEFAULT_LOCALE)
+})
+
+// The regression this pins, and why the fixture above had to change with it:
+// `settings.get(ns)` existed up to dsh 0.1.5-rc.3 and was gone by 0.1.7-rc.2,
+// while this read reached it through `?.` — so for two harness versions the
+// plugin silently spoke its fallback language and no test could tell. The
+// fixture used to model `get(ns)`; it now models `describe()` + `value`, which
+// is what the Host's own consumers read.
+test('the locale is read through describe(), the contract the Host has', () => {
+  const describeOnly = {
+    get: (name) =>
+      name === 'settings'
+        ? { describe: () => [{ ns: 'locale', value: { preference: 'en-US' } }] }
+        : undefined,
+  }
+  assert.equal(resolveLocale(describeOnly), 'en')
+
+  // A provider exposing ONLY the removed method must not yield an explicit
+  // locale. If this ever turns into 'en' again, the dead API has come back.
+  const getOnly = {
+    get: (name) => (name === 'settings' ? { get: () => ({ preference: 'en' }) } : undefined),
+  }
+  assert.equal(resolveLocale(getOnly), DEFAULT_LOCALE)
+})
+
+// The listener used to name `settings/updated`, an event the Host stopped
+// emitting in 0.1.7-rc.2 — so the live re-registration below never ran in
+// production. This drives the real event name through the real entry.
+test('a language change re-registers the commands on the event the Host emits', async () => {
+  const plugin = (await import('../lib/index.js')).default
+  const zh = translator('zh')
+  const en = translator('en')
+
+  const state = { locale: { preference: 'zh' } }
+  const ctx = fakeCtx({ items: [] })
+  ctx.settings = { describe: () => [{ ns: 'locale', value: state.locale }] }
+  const toolNames = []
+  const descriptions = []
+  let disposed = 0
+  ctx.tools = { register: (definition) => (toolNames.push(definition.name), () => {}) }
+  ctx.inject = (_deps, callback) =>
+    callback({
+      commands: {
+        register: (definition) => (descriptions.push(definition.description), () => (disposed += 1)),
+      },
+    })
+
+  plugin.apply(ctx)
+  // Both descriptions are strings fixed at registration time, so following the
+  // language live means registering them again.
+  assert.deepEqual(descriptions, [zh('cmd.peers.desc'), zh('cmd.peer.desc')])
+
+  state.locale = { preference: 'en' }
+  ctx.emit('settings/document-updated', 'locale', 2)
+  assert.deepEqual(
+    descriptions.slice(2),
+    [en('cmd.peers.desc'), en('cmd.peer.desc')],
+    'the namespace the Host sends is the one this plugin watches',
+  )
+  assert.equal(disposed, 2, 'the previous pair is disposed, not leaked')
+
+  // Another namespace is not ours and must not re-register anything.
+  ctx.emit('settings/document-updated', 'theme', 3)
+  assert.equal(descriptions.length, 4, 'only the locale namespace matters')
+
+  // The removed event name must stay dead — if it starts working, this plugin is
+  // listening to something the Host does not emit.
+  ctx.emit('settings/updated', 'locale')
+  assert.equal(descriptions.length, 4, 'settings/updated is not a Host event any more')
+
+  // Switch back, which also leaves the module-scope locale as the suite found it.
+  state.locale = { preference: 'zh' }
+  ctx.emit('settings/document-updated', 'locale', 5)
+  assert.deepEqual(descriptions.slice(4), [zh('cmd.peers.desc'), zh('cmd.peer.desc')])
 })
 
 test('both shipped locales cover every key the plugin asks for', () => {

@@ -12,7 +12,6 @@ PROFILE="${DSH_PROFILE:-web}"
 DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
 PROFILE_DIR="${DSH_HOME}/profiles/${PROFILE}"
 PATCH_FILE="${PROFILE_DIR}/cordis.patch.yml"
-DEPLOY_NODE_MODULES="${DSH_HOME}/profiles/node_modules"
 ROW_ID="dsh-peer-sessions"
 SKILL_DST="${DSH_HOME}/skills/peer-session"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -74,11 +73,17 @@ fi
 
 # -------------------------------------------------- 4. module resolution link
 NM="${REPO_DIR}/node_modules"
-if [ -L "${NM}" ] && [ "$(readlink "${NM}")" = "${DEPLOY_NODE_MODULES}" ]; then
+# The installer always creates this as a SYMLINK, never as a real dependency
+# directory, so a symlink here is ours — whatever it points at. Do NOT compare
+# the target against `$DSH_HOME/profiles/node_modules`: that was the deployment
+# only until a harness upgrade made it the stale one (see
+# scripts/link-deps.sh), and on a global or npx install the link points
+# elsewhere. Comparing reported "no link of ours" about a link we had created.
+if [ -L "${NM}" ]; then
+  say "[4/4] removed the node_modules link -> $(readlink "${NM}")"
   rm -f "${NM}"
-  say "[4/4] removed the node_modules link"
 else
-  say "[4/4] no node_modules link of ours to remove"
+  say "[4/4] no node_modules symlink to remove"
 fi
 
 say ""
