@@ -105,6 +105,26 @@ refused delivery spends no quota and does not advance the chain. Every number be
 asking side sees an `Overdue` notice on its next tool call, the receiving side sees
 `[timed out · …]` in its listing, and fetching that body adds a `deadline: OVERDUE` line.
 
+### Waiting, and how not to
+
+Delivery is idle-first in **both** directions, and the second one is what catches people:
+
+- your message queues behind the peer's current turn — it never interrupts them;
+- their reply queues behind **your** current turn, opening a *new* turn rather than
+  interrupting the one you are in. A blocking call is atomic, so a reply arriving during a
+  long command waits behind it.
+
+So an agent should never sleep, poll, or hold `wait_agent` open for a peer. It either ends
+the turn and is woken by the reply, or — if it must keep working — **pulls** with
+`peer_inbox`, which reads the plugin's own inbox: an already-delivered reply is readable
+immediately, even though its relay message only enters the transcript on the next turn.
+
+While a turn is running, an inbound peer message appears in the **queue strip above the
+composer**, printed with its full provenance header — text in that box which is not yours
+says whose it is. Each item offers edit / delete / **steer into the running turn**, and
+`Cmd`/`Ctrl`+`Enter` interjects every queued message. That is the human's escape hatch when a
+long step is holding a reply.
+
 ## Configuration
 
 The thresholds are yours to tune, from the plugin's composition row:
