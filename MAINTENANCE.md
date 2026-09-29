@@ -27,7 +27,7 @@
 |---|---|
 | `lib/index.js` | 插件入口：声明注入服务、装配两半、跟随语言变化重新注册命令 |
 | `lib/addressable.js` | **H1**：侧栏一致的可寻址集合（**唯一**列表来源）、输入净化 |
-| `lib/messages.js` | **H2**：来源不可伪造的消息构造 |
+| `lib/messages.js` | **H2**：来源不可伪造的消息构造（source 必须过宿主格式 v4 准入，见 §十一之六） |
 | `lib/consent.js` | **H3**：插件直接向人取授权（一张卡覆盖整个决定） |
 | `lib/core.js` | 投递主路径、进度渲染、拒绝语义 |
 | `lib/store.js` | 通道、授权档位、额度、收件箱（**进程内**，见坑 1） |
@@ -167,6 +167,14 @@ Node 按导入文件的 **realpath** 解析裸说明符。`link:` 安装把本�
 - **不要用 `git config core.fileMode false` 去消掉那三行。** `.git/config` 是**共享**的（同一个 `.git`），那会**同时关掉 WSL 侧的检查**——而那个检查正是你发现脚本权限被改的唯一防线。**让 Windows 侧显示"脏"，是对的状态。**
 
 这条还解释了为什么只有 3 个文件被标脏、而不是全部 23 个：`.gitattributes` 的 `eol=lf` 挡住了 CRLF 那一类噪音（见坑 12 旁边的发布一节）。
+
+### 14. 会话格式 v4 只认**生产者自有**的 `source.kind`——`kind:'plugin'` 已被废弃
+
+症状：`peer_send` 发一次，**整个对话就废**，每轮 `本轮运行失败 format v4 message requires a producer-owned source kind`；而对端其实**已经收到**了消息。
+
+三个要点：校验在**宿主的会话写入层**（不在 `createUserMessage`，所以构造、类型、单元测试全过）；失败发生在 `exec.deferContext()`，也就是**投递成功之后**（所以"发送即报废 + 重试会重复投递"）；被卡住的对话**不需要修数据**——脏行根本没落盘，重启后宿主会用 `interruptedTurnClosers` 给那条没结果的 `tool/call` 补一条"结果未知、别盲目重试"的合成结果，对话即可继续。
+
+判据：本包写进会话的每条消息，都必须能过宿主的 `assertV4RowAdmission`。完整经过、修法与教训见 **§十一之六**；测试里已把该函数请来当 oracle。
 
 ## 七、测试哲学：夹具必须对**数据**与**宿主契约**忠实
 
@@ -588,6 +596,50 @@ ctx.on('settings/document-updated', (ns) => { … })
 1. `./install.sh`，重启 profile；
 2. 把界面语言切成 **English** → `/peer`、`/peers` 的命令描述应立刻变英文（**这次要确认"当场变"，因为热切换路径此前从未生效过**）；
 3. 再切回中文 → 描述应变回中文。
+
+## 十一之六、发送方审计写进了 v4 已废弃的来源包装——`peer_send` **每发一次就打死自己的回合**
+
+### 现象
+
+用户报告：用 `peer_send` 发出一段话之后，**整个对话不可用**，之后每轮都是
+
+```
+本轮运行失败  format v4 message requires a producer-owned source kind
+```
+
+排障期间这张脸出现过四次（连发四次就失败四次），而**对端确实收到了消息**——这本身就该是线索：失败发生在投递**之后**。
+
+### 事实（都可在本机复现）
+
+- 报错不是本包抛的，是**宿主**的会话读写层：`@deepseek-ai/dsh-session-persistence-jsonl` 里 `assertV4RowAdmission` → `source()`。规则只有一句：message 的 `source` 必须是对象、`kind` 必须是非空字符串、**且不得等于 `'plugin'`**。
+- 本包 `lib/messages.js` 的 `buildDeliveryNotice()` 恰好写的就是 v4 之前的**通用插件包装**：
+
+  ```js
+  source: { kind: 'plugin', plugin: 'dsh-peer-sessions', form: 'notice', summary }
+  ```
+
+  而 v4 把它换成了"每个生产者一个 kind"；第三方插件的那个 kind 由宿主的 v3→v4 迁移函数 `producerKind()` 推导为 **`plugin:<包名>`**。
+- **错误不在构造处。** `createUserMessage` 不校验 source（design §12.1），所以这条消息一路通过构造、类型（`MessageSourceMap` 是可合并扩展的）和全部单元测试，只在宿主的 writer 那里被拒。
+- **时机最要命。** `lib/tools.js` 里 `exec.deferContext(core.deliveryNotice(result))` 排在 `core.deliver()` **之后**：对端已收到、通道额度已扣、inbox 已记账，然后审计追加炸掉整个回合。所以既"发了就废"，又"重试会重复投递"。
+- 磁盘证据：复现对话的物理行**止于 `peer_send` 的 `tool/call`，没有配对的 `tool/result`**；而所有 v4 会话文件里 `"kind":"plugin"` **一条都没有**（写被拒，脏行根本没落盘），只有迁移前的 v3 老会话里有。这也说明**不需要修数据**：坏行不存在，重启后重发即可。
+
+### 修法
+
+- `buildDeliveryNotice()` 改用 `NOTICE_KIND = 'plugin:' + PLUGIN_NAME`，并**去掉 `plugin` 字段**（v3→v4 迁移本来就会丢弃它）。选这个值是为了与"已经迁移过的老会话"里同一个插件的 kind 一致，而不是再造一个身份；relay 消息继续用 `peer-message`（它一直是合法的生产者 kind，且和审计是两种不同来源，不该合并）。
+- 模块注释写明"**本模块不得构造 `kind:'plugin'`**"，并附上宿主报错原文，方便下一个对话 grep。
+- **回归测试把宿主的判定函数请进来当 oracle**：直接 `import { assertV4RowAdmission }`，对本包写出的两种消息（relay / notice）× 两种落点（`user/message` / `agent/inbox/spliced`）逐个准入。护栏能力已实测：把 `NOTICE_KIND` 改回 `'plugin'`，该测试立刻失败，报错与线上**逐字一致**。这样测的是"宿主会不会接受"，不是"我复述的规则对不对"。
+- `docs/design.md` §12.1 那条"自定义消息来源可用，但运行时不做校验"正是这次误导的出处，已改成"构造不校验，**持久化层校验**"，并写明 v4 的规则与本次故障。
+
+### 教训（比这次修复更通用）
+
+1. **"构造时不校验"只说明错误会晚点出现，不说明不会出现。** 校验发生在副作用之后时，记账失败会伪装成操作失败——用户看到的是"发送把对话弄坏了"，不是"来源字段不合法"。
+2. **旧写法跨大版本不会报错，只会晚爆。** `kind:'plugin'` 通过了构造、类型和全部单元测试，只在宿主 writer 炸；而 writer 的报错又出现在用户可见的"本轮运行失败"里，与插件的关系并不显然。
+3. **测试要请真 oracle，不要复述规则。** 自己写一条"kind 不能是 plugin"的断言只能证明我记得规则；调宿主的 `assertV4RowAdmission` 才能证明宿主接受。宿主升级时，前者静默失效，后者直接失败。
+4. **副作用与记账的顺序决定了失败半径。** deferContext 放在投递之后就注定了"消息已送达、回合却失败"。这一条没有改（审计本身有价值），但值得知道：**任何 deferContext 的内容都必须先过宿主准入**。
+
+### 验收（需重启 profile，理由见坑 1）
+
+重启后让任一对话 `peer_send(kind:'notice')`：对端照常收到，**本端回合正常结束**，且本端会话里出现一条 `source.kind === 'plugin:dsh-peer-sessions'`、`form: 'notice'` 的 `user/message`。被此 bug 卡住的对话无需修复——脏行从未落盘，重发即可。
 
 ## 十二、进一步阅读
 

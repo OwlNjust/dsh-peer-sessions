@@ -25,7 +25,7 @@ import {
   stateLabel,
   parseDuration,
 } from '../lib/store.js'
-import { buildPeerMessage, buildDeliveryNotice, PEER_KIND } from '../lib/messages.js'
+import { buildPeerMessage, buildDeliveryNotice, PEER_KIND, NOTICE_KIND } from '../lib/messages.js'
 import { translator, resolveLocale, normalizeLocale, DEFAULT_LOCALE } from '../lib/i18n.js'
 import { isRuntimeRoot } from '../lib/consent.js'
 import { PeerCore, PeerRefusal } from '../lib/core.js'
@@ -619,11 +619,12 @@ test('building a peer message without a sender throws rather than degrading', ()
   )
 })
 
-test('the sender-side audit is a plugin-sourced notice', () => {
+test('the sender-side audit is a producer-owned notice', () => {
   const notice = buildDeliveryNotice('Delivered a notice to "X".', '  detail')
-  assert.equal(notice.source.kind, 'plugin')
-  assert.equal(notice.source.plugin, 'dsh-peer-sessions')
+  assert.equal(notice.source.kind, NOTICE_KIND)
+  assert.notEqual(notice.source.kind, 'plugin')
   assert.equal(notice.source.form, 'notice')
+  assert.equal(notice.source.summary, 'Delivered a notice to "X".')
 })
 
 // -------------------------------------------------------------------- consent
@@ -1593,16 +1594,20 @@ function wirePlugin(options = {}) {
     registerTools(ctx, new PeerCore(ctx, store, translator(DEFAULT_LOCALE)))
   }
   const tools = new Map(registered.map((definition) => [definition.name, definition]))
+  // Captured rather than discarded: the sender-side audit only exists as
+  // deferred context, and the harness admits it as a session row — so a test
+  // that wants to know whether the host would accept it must see it.
+  const deferred = []
   const call = (name, args = {}) =>
     tools.get(name).execute(args, {
       agent: ctx.agents.get(SELF),
       signal: new AbortController().signal,
-      deferContext() {},
+      deferContext: (context) => deferred.push(context),
     })
   // `store` is exposed so a test can assert the state a path leaves BEHIND, not
   // just what it returned — the difference that matters for read and reply
   // markers.
-  return { ctx, call, tools, store, selfAgent: ctx.agents.get(SELF) }
+  return { ctx, call, tools, store, deferred, selfAgent: ctx.agents.get(SELF) }
 }
 
 test('the plugin entry declares its services and wires both halves in apply()', async () => {
@@ -1646,6 +1651,42 @@ test('open channels survive the plugin being re-applied', async () => {
   // the existing grant instead of asking for another one.
   assert.equal(first.ctx.asked.length, 1)
   assert.equal(second.ctx.asked.length, 0)
+})
+
+// ------------------------------------- host session-format admission (v4)
+
+// The regression test for the 2026-09-29 outage. `peer_send` built its
+// sender-side audit as the retired wrapper `{ kind: 'plugin', plugin: … }`; the
+// harness's session-format-v4 admission refuses that on every append AND every
+// read, so the tool call died with
+//   "format v4 message requires a producer-owned source kind"
+// — and it died AFTER `core.deliver()` had already succeeded, so the peer had
+// the message while the sender's turn was broken, and retrying re-sent it.
+//
+// The oracle here is the harness's own `assertV4RowAdmission`, not a restatement
+// of its rule: a source the host would reject must fail this test rather than a
+// live conversation. Both messages a send writes are checked — the relay to the
+// peer (`followup` → an inbox splice) and the audit deferred onto the tool
+// result (`next-step` splice) — in both row shapes the host actually persists.
+test('every message peer_send writes passes the harness format-v4 admission', async () => {
+  const { assertV4RowAdmission } = await import('@deepseek-ai/dsh-session-format-v3-to-v4')
+  const { call, ctx, deferred } = wirePlugin({ grant: 1 })
+
+  await call('peer_send', { peer: 'Peer', kind: 'notice', summary: 'the audit must survive the host writer' })
+
+  const relay = ctx.received.at(-1).message
+  assert.equal(relay.source.form, 'relay', 'the relay is what the peer adopts')
+  assert.equal(deferred.length, 1, 'a delivery defers exactly one audit record')
+  assert.equal(deferred[0].source.form, 'notice')
+
+  for (const [what, message] of [['the relayed message', relay], ['the deferred audit', deferred[0]]]) {
+    for (const row of [
+      { seq: 1, type: 'user/message', data: message },
+      { seq: 2, type: 'agent/inbox/spliced', data: { target: 'next-step', start: 0, inserted: [message] } },
+    ]) {
+      assert.doesNotThrow(() => assertV4RowAdmission(row, undefined), `${what} must be admissible as ${row.type}`)
+    }
+  }
 })
 
 // ------------------------------------------------------------------- M2: inbox

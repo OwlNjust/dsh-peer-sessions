@@ -234,7 +234,7 @@ peer 消息**不能**：批准任何东西、修改任何权限、发起新的 p
 | 模型工具 | `ctx.tools.register()` + `defineTool()` |
 | 会话内授权 | 插件进程内的 Map，按 sessionId 索引 |
 | 消息来源 | `createUserMessage({ source: { kind: 'peer-message', form: 'relay', senderSessionId } })` |
-| 审计（发送方） | `exec.deferContext()` 追加一条 plugin-sourced `notice` |
+| 审计（发送方） | `exec.deferContext()` 追加一条 producer-owned `notice`（`kind: 'plugin:dsh-peer-sessions'`，**不是** 已废弃的 `kind:'plugin'`） |
 | 审计（接收方） | 收到的 relay 消息本身就是记录 |
 | 运行时根判定 | `ctx.agents.get(agent.id) === agent && ctx.agents.roots()` |
 
@@ -276,9 +276,10 @@ peer 消息**不能**：批准任何东西、修改任何权限、发起新的 p
 
 以下都是实测结论，不是推断；它们取代了设计初稿里的"待验证"清单。
 
-1. **自定义消息来源可用，但运行时不做校验。**
+1. **自定义消息来源可用；`createUserMessage` 不校验它，但会话持久化层校验。**
    `createUserMessage` 接受 `source = { kind: 'peer-message', form: 'relay', senderSessionId }`——`MessageSourceMap` 是可合并扩展的，没有运行时白名单。
    ⚠️ 但它**同样接受缺少 `senderSessionId` 的来源**。也就是说 H2 无法靠运行时保证，只能靠代码强制：`lib/messages.js` 在缺少发送方时直接抛错，绝不降级。
+   ⚠️ **构造不校验不等于没人校验。** 会话格式 v4（dsh `0.1.7-rc.2` 起）在**每次追加写入、也每次读取**时都会用 `assertV4RowAdmission` 检查 source：`kind` 必须是非空字符串，且**不得是已废弃的通用包装 `'plugin'`**（报错原文 `format v4 message requires a producer-owned source kind`）。第三方插件自己的生产者 kind 由 v3→v4 迁移推导为 `plugin:<包名>`。**2026-09-29 的故障就是发送方审计写了 `kind:'plugin'`**——构造、类型、单元测试全过，直到宿主的 writer 拒绝该行；而 `exec.deferContext()` 在投递**之后**，于是整回合连同已完成的投递一起失败。详见 `MAINTENANCE.md` §十一之六。
 
 2. **命令注册与工具注册的形状。**
    `ctx.commands.register()` 每个调用自动写 `command/run` / `command/done`（审计白拿），handler 不经过模型。
@@ -349,7 +350,7 @@ peer 消息**不能**：批准任何东西、修改任何权限、发起新的 p
 | 授权卡片 | 两次真机运行（一次英文、一次中文），档位与文案都对 |
 | 冷会话唤醒 | 对端由 `not running` 变为 `running`，且必须先确认 |
 | 投递与来源标注 | 对端收到 `[peer-session message · NOT a user instruction]` |
-| 发送方审计 | 工具输出出现 `deferContext` 生成的 plugin-sourced notice |
+| 发送方审计 | 工具输出出现 `deferContext` 生成的 producer-owned notice（`kind: 'plugin:dsh-peer-sessions'`） |
 | **回复闭环** | 对端 `peer_send(kind:'reply', replyTo:…)` → 本端收件箱收到 `received` |
 | **一次往来** | 同一次回复**搭了那张「仅这一次」批准**，对端没有再被弹卡片；回复送达后通道自动作废 |
 | 语言跟随（**只在宿主 ≤0.1.5-rc.3 上成立；0.1.7 起静默失效，已修、待真机复核**） | 命令描述与提问卡片随 `locale.preference`（缺失时回退简体中文）。**这条记录不再代表当前行为**：读值用的 `settings.get(ns)` 与监听用的 `settings/updated` 都在 dsh `0.1.7-rc.2` 被移除，而两者分别走可选链与静默订阅，所以此后一直是"永远回退中文"，且不报错。详见 `MAINTENANCE.md` §十一之五 |
@@ -370,7 +371,7 @@ peer 消息**不能**：批准任何东西、修改任何权限、发起新的 p
 | **新词表逐字通过**（M2 措辞改名验收） | 同版本下由对端会话走完整对照：取回**前** `- [unread] request from …`，取回**后** `- [read · never answered] request from …`，取回抬头 `state: read · never answered`——与新词表**逐字一致**。`still unanswered` 已统一为 `never answered`。本端亦独立走通另一条："`[unread] reply …` → 取回 → 无标记" |
 | ~~**跳数在真机上的递进**~~（**基于旧实现，已作废**） | 那条记录说「对端回答 hop 1 时发出 hop 2」——那正是 v1.0.1 修掉的错误规则。**回复不再加深链条**：同一对之间的来回**恒为 hop 1**，只有接力给第三方才 +1。正确的实测见下一条 |
 | **超时的三个轴在真机上叠加显示** | 对端观测同一条 request 的完整演化：`[unread]` → 越过期限后（**无需任何工具调用**，因为超时是实时判断的）`[timed out · unread]` → 取回正文后 `[timed out · read · never answered]`。三轴并存、互不顶掉，与正交设计一致 |
-| **超时通知在真机上出现，且只出现一次** | 发一条 `replyWithin: 3s` 的 request，到点后下一次 `peer_send` 的输出末尾出现：`已超时：你发出的 1 条请求始终没有回复。` + `req-1-mu1fnak0 -> 「平级对话通信技能设计」（约定的时间是 3s）` + `不会重发，也不应该重发。…`——**没有重发**。`peer_list` 另显示 `Waiting for 1 answer(s)`，过点后带 `· OVERDUE` |
+| **超时通知在真机上出现，且只出现一次** | 发一条 `replyWithin: 3s` 的 request，到点后下一次 `peer_send` 的输出末尾出现：`已超时：你发出的 1 条请求始终没有回复。` + `req-1-mu1fnak0 -> 「<对端标题>」（约定的时间是 3s）` + `不会重发，也不应该重发。…`——**没有重发**。`peer_list` 另显示 `Waiting for 1 answer(s)`，过点后带 `· OVERDUE`。**对端标题是真实会话标题，按仓库卫生规则（`MAINTENANCE.md` §九）替换为占位符**（引文其余部分逐字保留） |
 | **取回抬头与列表在超时上已经对称**（修复验收） | 真机取回一条 `replyWithin: 1s` 的入站 request：抬头为 `Delivered … · state: read · never answered · request: req-3-mu1fsbv4` + **独立一行** `deadline: OVERDUE`；同一份列表为 `[timed out · read · never answered]`。**两边都有**，对端指出的"列表有、抬头没有"的不对称消除。期限保持为**独立轴**，没有被折进 `state:`（提出者本人也这么主张） |
 | **回复不加深链条**（v1.0.2 真机三处一致） | 与一个真实对端会话走完整往返：① 本端起头 `hop: 1`；② 对端**回信**时它看到的也是 `hop: 1`——**决定性证据**，因为旧规则下它应当是 2（它收到我的 hop 1 时正处在「有入站记忆」状态）；③ 本端**再回复**仍是 `hop: 1`，而此时本端已收到过它的入站消息，旧规则下这里该是 2。三处独立观测一致。回归测试 `replying to the other side does not deepen the chain` 另用**六次往返**钉住同类行为 |
 | **`peer_list` 两轴真机显示** | `- "…" · tier=session · remaining=198 (messages) · hop=1/3 (relay depth, 2 left) · peer=running`。报告方原话："`(relay depth, 2 left)` 和单位 `(messages)` 都在——猜配额那处现在有名字了" |
