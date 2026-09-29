@@ -25,14 +25,16 @@
 
 | 路径 | 作用 |
 |---|---|
-| `lib/index.js` | 插件入口：声明注入服务、装配两半、跟随语言变化重新注册命令 |
+| `lib/index.js` | 插件入口：**具名导出**（`inject` / `Config` / `apply`，**故意没有 default**）、装配两半、跟随语言变化重新注册命令 |
 | `lib/addressable.js` | **H1**：侧栏一致的可寻址集合（**唯一**列表来源）、输入净化 |
 | `lib/messages.js` | **H2**：来源不可伪造的消息构造（source 必须过宿主格式 v4 准入，见 §十一之六） |
-| `lib/consent.js` | **H3**：插件直接向人取授权（一张卡覆盖整个决定） |
+| `lib/consent.js` | **H3**：插件直接向人取授权（一张卡覆盖整个决定），返回**带原因**的判别值 |
 | `lib/core.js` | 投递主路径、进度渲染、拒绝语义 |
-| `lib/store.js` | 通道、授权档位、额度、收件箱（**进程内**，见坑 1） |
+| `lib/store.js` | 通道、授权档位、额度、收件箱（**进程内**，见坑 1）；`STORE_DEFAULTS` 是阈值默认值的**唯一**来源 |
 | `lib/commands.js` / `lib/tools.js` | 2 条命令 + 4 个工具 |
-| `lib/i18n.js` | zh/en 文案表、语言解析、插值 |
+| `lib/i18n.js` | zh/en 文案表、语言解析、插值（命名空间与字段名从 `dsh-client-locale` 读，不再复写字面量） |
+| `locale/en.json` / `locale/zh.json` | 插件管理页的**显示标题与描述**（宿主读的是这里的 `meta`，不是 `package.json.meta`，见 §十一之七） |
+| `icon.svg` | 管理页图标；清单顶层 `icon` 指向它（相对路径、SVG/PNG/JPEG/WebP、≤256 KiB） |
 | `test/peer.test.js` | 全部测试（需要依赖链接，见第四节）——**条数以 `npm test` 末行的 `tests` 为准**，散文里的数字会过期 |
 | `skill/peer-session/SKILL.md` | 给**模型**看的说明书（安装时复制到 `$DSH_HOME/skills/`） |
 | `docs/design.md` | 权威需求规格 + 真机验证表（§12） |
@@ -175,6 +177,12 @@ Node 按导入文件的 **realpath** 解析裸说明符。`link:` 安装把本�
 三个要点：校验在**宿主的会话写入层**（不在 `createUserMessage`，所以构造、类型、单元测试全过）；失败发生在 `exec.deferContext()`，也就是**投递成功之后**（所以"发送即报废 + 重试会重复投递"）；被卡住的对话**不需要修数据**——脏行根本没落盘，重启后宿主会用 `interruptedTurnClosers` 给那条没结果的 `tool/call` 补一条"结果未知、别盲目重试"的合成结果，对话即可继续。
 
 判据：本包写进会话的每条消息，都必须能过宿主的 `assertV4RowAdmission`。完整经过、修法与教训见 **§十一之六**；测试里已把该函数请来当 oracle。
+
+### 15. 模块一旦有 `default` 导出，兄弟具名导出就**全部不可见**（`Config` 就这样被吞掉）
+
+症状：声明了 `export const Config`、schema 也对，但 `Config.listConfigs` 永远 `absent`、`apply` 收到的 `config` 永远是 `undefined`——**不报错**。
+
+原因：加载器的 `unwrapExports` 在原生 ESM 上只返回 `exports.default`（原生命名空间没有 `__esModule`，那一层判断直接返回）。所以 `export default {...}` 与 `export const Config` **不能共存**；宿主自己的插件也从不这么写（127 个声明 `Config` 的插件里 0 个这么干）。本包从 v1.0.4 起是**纯具名导出**，并有测试拿真 `unwrapExports` 当 oracle。完整依据见 §十一之七。
 
 ## 七、测试哲学：夹具必须对**数据**与**宿主契约**忠实
 
@@ -399,7 +407,7 @@ Windows 侧显示的"已修改"是视错觉——见坑 13。
 
 ### 一次改动的标准流程
 
-1. `npm run link` → `npm test`（82 项）
+1. `npm run link` → `npm test`（条数以末行为准，别抄散文里的数字）
 2. 任何涉及真机契约的改动 → **必须真机验一遍**：`./install.sh` + **重启 profile**（坑 1）
 3. 改了文案 → 同时补 `lib/i18n.js` 的 `zh` 与 `en`（有测试检查两张表的键完整性）
 4. 改了行为 → 更新 `docs/design.md` §12 的验证表
@@ -524,7 +532,33 @@ pnpm 那一步**是成功的**，失败发生在管理器随后的校验——�
 | 生效 | 装完自动 | 手改 profile 后重启 |
 | 更新 | **git 快照**，每次发版要在管理器里更新一次 | `link:` **实时**，改代码重启即生效 |
 
-两者会激活**同一个 id**，**同时存在就是装两次**。为此 `install.sh` 第 3 步加了守卫：若发现本包已是该 profile 的活跃组合包，就**拒绝**再追加手写行。
+两者会激活**同一个 id**。为此 `install.sh` 第 3 步加了守卫：若发现本包已是该 profile 的活跃组合包，就**拒绝**再追加手写行。
+
+#### 重复行到底会怎样（2026-09-30 核实，推翻了一个更吓人的说法）
+
+一次只读架构审核断言"两条路线并存 → **装载硬失败**、`/peer`、`/peers` 与四个工具**全部不可用**"。**这个结论不成立**，两条独立证据各自就足以推翻它：
+
+1. **同一个 group 里的重复 id 不会挂载两次。** 组合层确实会把这一行列两次（审核实测 `--dump-config | grep -c` = 2，本文件此前也据此推断），但挂载走的是 `cordis-plugin-loader` 的 `EntryGroup.update`：
+
+   ```js
+   // cordis-plugin-loader/lib/index.js:82
+   const newMap = Object.fromEntries(config.map((options) => [options.id ?? Symbol("anonymous"), options]))
+   ```
+
+   `Object.fromEntries` 遇重复键**后者覆盖前者**，随后 `ids` 里该 id 只出现一次，`create()` 又走 `tree.store[id] ??= new Entry(...)`——所以**同一个 id 只挂一个 Entry、只 apply 一次**，用的是**靠后那一行**的 options。全程**静默**：loader 与 app-boot 里都没有重复 id 的诊断（只有"patch 找不到目标 id"会警告）。
+2. **就算真的 apply 两次，工具面也不会全灭。** 第二次 `ctx.tools.register('peer_send')` 会在 `apply` 里同步抛 `tool "peer_send" is already registered (for a per-agent variant, register through that agent's agent.ctx instead)`，但 cordis 会**接住**这次 apply 失败（`cordis/lib/index.js:1356-1362`：`logger.error(reason)`，fiber 置 INACTIVE 并回卷它自己的注册），而**第一个实例的注册仍然活着**。本包不在 `requiredStartupEntryIds` 里，所以启动只多一条警告。真正会 apply 两次的是"同一 id 落在**两个不同 group**"这种更少见的结构。
+
+**结论**：重复行的真实代价是**一行被静默遮蔽**（靠后的那份决定 options，包括 `config`），不是崩溃。因此**没有**在 `apply` 里加"已注册就跳过"的守卫——它守的是一个不存在的故障，而且会在**合法的 loader re-apply** 上产生风险（万一 loader 是先 apply 后 dispose，守卫就会让插件再也注册不上工具）。改为：
+
+- 包内 `cordis.patch.yml` 的**单 insert / id 唯一**由测试钉住（`test/peer.test.js` "the shipped patch layer declares this package exactly once"）；
+- README 两版把"装两次"改成"静默遮蔽"，并说明代价；
+- 人工核查命令（可随时跑，只读）：
+
+  ```sh
+  dsh --profile web --dump-config | grep -c 'id: dsh-peer-sessions'   # 期望 1
+  ```
+
+> **证据等级**：第 1 条是**读 loader 源码**（`Object.fromEntries` 的键语义 + `??=` 建 Entry）加审核的 `--dump-config` 实测；**"挂载只发生一次"没有真机直接观测**（要带重复 overlay 真启一次 web profile）。第 2 条同样来自源码，未做重复注册实验。两条都比原断言更可核。
 
 **排查过的安全性**：给包加 `dsh.bundle` **不影响已有 web profile**——组合树只应用 `dsh.profile.bundles` 里列出的组合包，而本包在 web profile 里是路线 B（不在 `bundles` 里）。实测：web profile `bundles = [dsh-base, dsh-web-app, dsh-deepseek-balance]`，不含本包；用户 patch 层里恰好 1 条手写 insert 行，不重复。
 
@@ -640,6 +674,52 @@ ctx.on('settings/document-updated', (ns) => { … })
 ### 验收（需重启 profile，理由见坑 1）
 
 重启后让任一对话 `peer_send(kind:'notice')`：对端照常收到，**本端回合正常结束**，且本端会话里出现一条 `source.kind === 'plugin:dsh-peer-sessions'`、`form: 'notice'` 的 `user/message`。被此 bug 卡住的对话无需修复——脏行从未落盘，重发即可。
+
+## 十一之七、`Config`：阈值交还给用户，以及两个**静默失效**的陷阱
+
+**背景**：本包所有上限（跳数、速率、额度、收件箱条数…）原本都是模块常量，用户想改只能改 `lib/store.js`——**升级即被覆盖**；而 README 早就把它们写成"上限"档位。v1.0.4 起用宿主插件通用的 `Config` 交还（`lib/index.js`）。
+
+### 宿主侧事实（0.2.0-rc.2 实测）
+
+| 事实 | 依据 |
+|---|---|
+| schema 构造器是 `@deepseek-ai/schemastery`，**默认导入** `import z from '…'` | 127 个装了 `Config` 的宿主插件里 126 个用这个说明符；`cordis` 根本不导出 schema 构造器 |
+| 行里**省略 `config`** 时默认值生效 | `resolveConfig`（`cordis/lib/index.js:956-961`）→ `runtime.Config['~standard'].validate(undefined)`；schemastery 对 nullish 取 `meta.default`，object 的默认是 `{}`，逐字段再取默认。用真实 `Context` 实测：`apply` 收到 `{limit:7,label:'d'}` |
+| `apply(ctx, config)` 收到的是**校验并填好默认值之后**的对象 | `Fiber._reload` 先 `this.config = this._resolveConfig(this._config)` 再跑 runner |
+| 行的 `config` 是**整体替换**，不是深合并 | `dsh-app-boot/lib/index.js:104-105` 逐键 `target[key] = value` |
+| **未知键会被保留**（不报错） | schemastery 的 `strict` 默认为 false，`merge(result, data)` |
+| `Config.listConfigs` 是 **inspect query**，不是服务；只给 schema + status，不给当前值 | `dsh-tool-cordis/lib/types/providers.js:37`、`config.js:67-92`。**当前值**读 `entry.fiber.config`（已解析）或 `entry.options.config`（原始） |
+
+### 陷阱 1：模块里有 `default` 导出 → `Config` 被**静默丢弃**
+
+加载器这样取插件的导出：
+
+```js
+// cordis-plugin-loader/lib/index.js:664-669
+unwrapExports(exports) {
+  if (isNullable(exports)) return exports
+  exports = exports.default ?? exports
+  if (!exports.__esModule) return exports    // ← 原生 ESM 在此返回
+  return exports.default ?? exports
+}
+```
+
+原生 ESM 命名空间**没有** `__esModule`，所以一旦模块有 `default` 导出，loader 就**只拿 default 那个对象**，兄弟具名导出全部看不见。后果不是报错：`runtime.Config` 是 `undefined` → `resolveConfig` 直接 early-return → `apply` 永远收到 `undefined`，`Config.listConfigs` 永远报 `absent`。**实测**（对真实 ESM 命名空间调真实 `unwrapExports`）：`export default {...}` + `export const Config` → 解包后只有 `inject`/`apply`。
+
+作者的普查：127 个声明 `Config` 的宿主插件里，**0 个**把 `Config` 挂在 `default` 对象上。本包因此改成**具名导出**（`export const inject` / `export const Config` / `export function apply`，无 default），并加了一条**用真 `unwrapExports` 当 oracle** 的测试。
+
+### 陷阱 2：少一个 `.default()` → 插件**静默不加载**
+
+`z.object({ must: z.string().required() })` 遇到省略的 `config` 会返回 issues → cordis 抛 `ValidationError` → `_reload` 接住、`logger.error`、fiber INACTIVE。本包**不在** `requiredStartupEntryIds` 里，所以启动**只警告**：进程照常起，插件没了。**规矩：`Config` 的每个字段都必须有 `.default(...)`**，且默认值引用 `STORE_DEFAULTS` / `CORE_DEFAULTS`，测试再断言两边相等（否则文档、schema、代码三处会各说各话）。
+
+### 显示元数据：`package.json.meta` 是**死字段**
+
+审核建议加 `"meta": { "title", "description" }`。**在 0.2.0-rc.2 上这没有任何效果**——`readPluginMeta`（`dsh-app-boot/lib/index.js:1969-1999`）从不读 `manifest.meta`，它读：
+
+- 标题/描述：`<包>/locale/<lang>.json` 里的 `{ "meta": { "title", "description" } }`，文件本身要通过**包的 `exports`** 解析得到（`optionalResourcePath` 走 Node resolver）——所以 `"./locale/*.json"` 必须导出去；`locale/en.json` 不存在则整个扫描都不发生，标题回退成**包名**。
+- 图标：清单**顶层** `icon`（相对路径、SVG/PNG/JPEG/WebP、realpath 后仍在清单目录内、≤256 KiB），读取时就地转成 data URL。
+
+本包已补 `locale/en.json`、`locale/zh.json`、`icon.svg`，并用宿主的 `readPluginMeta` 实测解析出 `{en, zh}` 标题与图标 data URL。测试里钉的是**这些资源的形状与导出**（真 reader 需要包能被"按名字"解析，那是 profile 里才成立的条件）。
 
 ## 十二、进一步阅读
 

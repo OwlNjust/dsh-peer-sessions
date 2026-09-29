@@ -26,12 +26,15 @@
 一个 agent 绝不能对着一个人类看不见的对话说话。**
 
 可寻址集合直接由侧栏自己的可见性规则推导
-（`dsh-client-ui-workspace` 里的 `sessionVisible`）：
+（`dsh-client-ui-workspace` 里的 `sessionVisible`）。下面是那两处宿主读取——
+**服务名与返回形状都请注意**，README 初稿两处都写错了：
 
 ```js
-const archived = new Set(ctx.workspace.archivedSessionIds)
-const summaries = await ctx.sessionController.list()   // 与侧栏同源
-const addressable = summaries.filter(s =>
+// 规则的完整形态（含"每个隐藏会话为什么被隐藏"）在 lib/addressable.js 的
+// `classify`——那个文件是权威，这里只是示意。
+const archived = new Set(ctx.workspaceRegistry.archivedSessionIds)
+const { items } = await ctx.sessionController.list({}, signal)   // 是 { items }，不是数组
+const addressable = items.filter(s =>
       s.origin !== 'subagent'
    && !archived.has(s.sessionId)
    && !s.blank)
@@ -46,7 +49,7 @@ const addressable = summaries.filter(s =>
 
 ## 维护
 
-**[MAINTENANCE.md](MAINTENANCE.md)** 写给下一个接手的人，包括**没有任何历史上下文的新对话**：怎么接线、四条硬不变量，以及十三个**已经真实花过时间**的坑——会 re-apply 却不重新读模块的加载器、不能软链的技能、必须是软链的 `node_modules`、以及和直觉不符的投影形状。
+**[MAINTENANCE.md](MAINTENANCE.md)** 写给下一个接手的人，包括**没有任何历史上下文的新对话**：怎么接线、四条硬不变量，以及十五个**已经真实花过时间**的坑——会 re-apply 却不重新读模块的加载器、不能软链的技能、必须是软链的 `node_modules`、以及和直觉不符的投影形状。
 
 **动手前先读它。**
 
@@ -75,7 +78,7 @@ const addressable = summaries.filter(s =>
 
 ## 环路防护
 
-两个会话互相回复可以无限持续，所以有三道上限加一个超时通知，**全部在投递之前判定**——被拒绝的投递不消耗额度、也不推进链条：
+两个会话互相回复可以无限持续，所以有三道上限加一个超时通知，**全部在投递之前判定**——被拒绝的投递不消耗额度、也不推进链条。下表每个数字都是**配置项**（见[配置](#配置)），这里给的是默认值。
 
 | 防护 | 上限 | 说明 |
 |---|---|---|
@@ -86,9 +89,78 @@ const addressable = summaries.filter(s =>
 
 `request` 的 `replyWithin`（如 `"15m"`、`"4h"`）是真正的期限：到点后发起方下一次调用工具时会看到一条 `Overdue` 提示；收到请求的一侧在列表里看到 `[timed out · …]`，取回正文时抬头多一行 `deadline: OVERDUE`。
 
+## 配置
+
+阈值由你在插件的组合行里调：
+
+```yaml
+- id: dsh-peer-sessions
+  name: dsh-peer-sessions
+  config:
+    hopLimit: 5
+    rateLimit: 60
+    rateWindowMs: 60000
+    channelBudget: 500
+    inboxLimit: 100
+    requestMemory: 1000
+    pendingGraceMs: 86400000
+    hopMemoryMs: 900000
+    maxCandidates: 8
+    recentTurns: 3
+    previewMaxChars: 200
+```
+
+| 字段 | 默认 | 管什么 |
+|---|---|---|
+| `hopLimit` | `3` | 一条链跨会话被接力多少跳之后拒绝 |
+| `rateLimit` / `rateWindowMs` | `30` / `60000` | 一对会话在一个固定窗口内能投递多少条 |
+| `channelBudget` | `200` | 一条通道一生的投递总量 |
+| `hopMemoryMs` | `900000` | 一条入站消息在多长时间内仍算"正在回答的那条" |
+| `inboxLimit` | `50` | 每个会话保留的收件箱条目数 |
+| `requestMemory` | `500` | 为回复方向校验记住多少个请求发起方 |
+| `pendingGraceMs` | `86400000` | 未回答的请求继续被报告多久 |
+| `maxCandidates` | `8` | 标题歧义时最多列几个候选会话 |
+| `recentTurns` | `3` | `peer_progress` 摘要末尾几轮 |
+| `previewMaxChars` | `200` | `peer_progress` 单行预览的上限 |
+
+改之前有两件事值得知道：
+
+- **一行的 `config` 是整体替换，不是深合并。** 只写一个字段没问题（其余由 schema 声明的默认值补齐，有测试钉住）；但**多层覆盖同一行**时，靠后的那个 `config` 对象**整块**胜出。若你从两处设置，靠后的那处要列全你想保留的字段。
+- **每个字段都有默认值。** 少一个默认值，省略 `config` 就会变成校验失败；而校验失败的插件在启动时**只是一条警告**——profile 照常启动，插件却静默消失。默认值就是上表的值，所以完全省略 `config` 永远安全。
+
+## 数据与边界
+
+本插件拥有的一切都在**进程内存**里，不落盘、也不写进任何会话日志：
+
+- 通道、授权、收件箱、待办期限——全是按 session id 索引的 Map，**重启即清空**。授权随进程结束而消失，这是"本对话内"这一档位的既定边界，不是疏漏。
+- 因为不写会话事件，这些状态**无法从对话记录里重放或恢复**。`peer_inbox(id)` 那句"正文仍可取回"的边界是**宿主进程的生命周期**。
+- 为什么不持久化：持久化读取路径会拒绝词汇表之外的自定义 `type`，除非该事件带 `ignorable: true`，而实时 `Session.append()` 设不了这个标记——那样这个会话从此打不开。详见 `docs/design.md` H2 与 `MAINTENANCE.md` §2.1。
+- 由此有两个值得明说的推论：**插件被 re-apply**（文件变更后加载器重放）**通道还在**；**停用再启用该行也还在**——它们不随卸载清除，只随进程结束消失。
+
+## 卸载
+
+```sh
+./uninstall.sh
+```
+
+它按顺序撤销安装的四步：
+
+| 步骤 | 移除什么 |
+|---|---|
+| 1 | 已部署的技能目录 `~/.dsh/skills/peer-session/` |
+| 2 | profile `cordis.patch.yml` 里手写的 `insert` 行（先备份） |
+| 3 | profile 依赖（`dsh plugin remove dsh-peer-sessions`） |
+| 4 | 本包的 `node_modules` 软链 |
+
+之后**必须重启 profile**——进程不重启，插件就一直还在。走路线 A（插件管理器）安装的，请在管理器里卸载；只对**你实际用的那条路线**执行，事后核对：
+
+```sh
+grep -c dsh-peer-sessions ~/.dsh/profiles/web/cordis.patch.yml   # → 0
+```
+
 ## 安装
 
-**两条路线，只能选一条。** 它们都会激活同一个插件 id；**同时使用会把插件装两次**。
+**两条路线，只能选一条。** 它们都会激活同一个插件 id。重复不会有人拦——组合层会把这一行列两次，加载器把该 id **只挂一次、靠后者胜出、且没有任何警告**（0.2.0-rc.2 实测，见 `MAINTENANCE.md` §十一之四）。所以代价不是崩溃，而是**一行被静默遮蔽**：靠后的那份决定该行的 `config`，而这种事往往要花掉一个下午才会发现"某个设置根本没生效"。
 
 ### 路线 A：作为组合包安装（桌面端「管理插件」/ 仓库地址）
 
@@ -133,7 +205,7 @@ dsh plugin --profile web add link:/path/to/dsh-peer-sessions
 ```
 
 > `./install.sh` 会**跳过**追加那一行——如果它发现本包已经是该 profile 的活跃组合包（路线 A 装过）。
-> 两条路线同时生效会让插件被激活两次。
+> 重复的行会静默遮蔽另一行（见上）。
 
 复制技能——是**复制**不是软链，因为技能提供者用 `lstat` 语义列举技能根，
 软链的目录永远不会被发现：
@@ -147,14 +219,18 @@ mkdir -p ~/.dsh/skills && cp -r skill/peer-session ~/.dsh/skills/
 ## 开发
 
 ```sh
-node --test      # 25 项测试，不需要 harness
+npm run link     # 每台机器跑一次：把 node_modules 链到宿主实际在用的那份
+npm test         # 全部测试；不需要宿主进程
 ```
 
-测试跑真实的 `@deepseek-ai/dsh-llm` 消息构造 + 一个假宿主上下文，
+测试跑真实的 `@deepseek-ai/dsh-llm` 消息构造、把真实的
+`@deepseek-ai/dsh-session-format-v3-to-v4` 准入校验当 oracle，外加一个假宿主上下文，
 所以每条不变量都被覆盖，而不需要启动进程。
+
+那个软链是**前置条件，不是便利**：裸 `@deepseek-ai/*` 说明符按导入文件的 realpath 解析，
+没跑过 `scripts/link-deps.sh` 的机器上测试会在 import 处直接失败。
+当前测试条数以 `npm test` 末行为准。
 
 ## 状态
 
-**M1 已实现**，等待真实双会话验收。里程碑划分与验收路径见
-[docs/design.md §13](docs/design.md)；实现期实测到的运行时事实见 §12——
-其中两条修正了设计初稿。
+**已上线。** 设计冻结在 [docs/design.md](docs/design.md)（§12 记录真机上验过什么，§13 是里程碑划分）。

@@ -229,9 +229,11 @@ peer 消息**不能**：批准任何东西、修改任何权限、发起新的 p
 | 目标唤醒 | `ctx.sessionController.resolveAgent()` → `{ agent } \| { error }` |
 | 投递 | `agent.followup()` / `agent.inject()` —— **从不用 `steer()`** |
 | 进度 | `sessionController.list()` 带的 projection 值，只读叶子字段 |
-| 授权 | `ctx.userQuestions.ask()`（插件直接问人，模型不经手） |
+| 授权 | `ctx.userQuestions.ask()`（插件直接问人，模型不经手）。返回**带原因的判别值**：`granted` / `declined` / `unavailable`——"没问到人"与"人拒绝了"必须分开，后者不可重试而前者可以 |
 | 用户命令 | `ctx.commands.register()` |
 | 模型工具 | `ctx.tools.register()` + `defineTool()` |
+| 阈值配置 | `export const Config`（`@deepseek-ai/schemastery`）——宿主校验并填入默认值，`apply(ctx, config)` 收到解析后的对象。**必须具名导出**：模块一旦有 `default` 导出，加载器的 `unwrapExports` 只返回它，`Config` 会被静默丢弃 |
+| 显示元数据 | `locale/<lang>.json` 的 `meta.title` / `meta.description` + 清单顶层 `icon`（**不是** `package.json.meta`，宿主从不读它） |
 | 会话内授权 | 插件进程内的 Map，按 sessionId 索引 |
 | 消息来源 | `createUserMessage({ source: { kind: 'peer-message', form: 'relay', senderSessionId } })` |
 | 审计（发送方） | `exec.deferContext()` 追加一条 producer-owned `notice`（`kind: 'plugin:dsh-peer-sessions'`，**不是** 已废弃的 `kind:'plugin'`） |
@@ -250,6 +252,10 @@ peer 消息**不能**：批准任何东西、修改任何权限、发起新的 p
 | **每对消息上限** | `CHANNEL_BUDGET = 200`（M1 已有） | `store.spend` | 一条通道一生可投递的总量 |
 | **跳数上限** | `HOP_LIMIT = 3` | `store.nextHop(sessionId, toId)` / `noteInboundHop` | 一条**接力链**跨会话传播的深度。**计的是「接力」，不是「回复」** |
 | **请求超时通知** | `replyWithin` 解析成 `dueAt`；默认窗口 `HOP_MEMORY_MS = 15min` 只用于 hop 记忆 | `store.notePending` / `overdueRequests` | 到点后**通知一次**发起方，**绝不自动重发**（B5） |
+
+**表里每个参数都是可配置项，默认值就是表中值**（§12.9）。宿主插件可以用 `Config` 把这类阈值交还给用户，本包从 v1.0.4 起这么做：上表的 `hopLimit` / `rateLimit` / `rateWindowMs` / `channelBudget` / `hopMemoryMs` / `inboxLimit` / `requestMemory` / `pendingGraceMs`，加上两个展示偏好 `maxCandidates` / `recentTurns` / `previewMaxChars`。**默认值只有一份**（`STORE_DEFAULTS` / `CORE_DEFAULTS`），schema 引用它们，测试再断言两边相等——文档里的数字、schema 的默认值、代码实际用的值不会各说各话。
+
+⚠️ **行的 `config` 是整体替换，不是深合并**：只写 `hopLimit` 的话其余字段由 schema 默认值补齐（这一点有测试），但**同一行的层叠覆盖**是整块替换的，写文档时要提醒用户列全要保留的字段。
 
 **跳数为什么由插件记、而不是写进消息让模型带**：模型看不到也不需要维护这个数字。若靠模型在 `peer_send` 里传递，它漏传一次链条就断，而**断掉的是防护**。做法是收发的两侧都由 store 记：投递时 `noteInboundHop(接收方, hop, 发送方)`，发送时 `nextHop(发送方, 目标)`；没有入站记录（或记录已过期）时按 **1** 起算——那是「用户自己起的话头」。
 
@@ -391,6 +397,16 @@ peer 消息**不能**：批准任何东西、修改任何权限、发起新的 p
 ### 仍未在生产中验证的部分
 
 **一项待验（2026-09-29 的语言跟随修复引入）**：修复必须**重启 profile** 才会被加载（坑 1 的同一个性质），所以本轮无法在自己正在服务的会话里验收。步骤：`./install.sh` + 重启 → 语言切 **English** → `/peer`、`/peers` 的描述应**当场**变英文 → 切回中文。判据要落在"当场变"上，因为热切换路径此前**从未生效过**（它等的那个事件在 0.1.7-rc.2 就被移除了）。
+
+**新增待验清单（2026-09-30 的架构审核整改，全部需要重启 profile）**：
+
+| 待验项 | 判据 | 为什么单元测试不够 |
+|---|---|---|
+| `Config` 生效 | 在组合行写 `config: { hopLimit: 5 }` → `/peer` 与 `peer_list` 的 hop 轴显示 `hop=1/5` | 单测直接构造 schema；**"loader 把解析后的对象交给 apply"** 只在真机上发生 |
+| 省略 `config` 仍加载 | 行里删掉 `config` → 插件照常可用、默认值可观测 | 同上：真机才走 `Fiber._resolveConfig` |
+| 管理页卡片 | 插件管理页显示「平级会话通道」+ 描述 + 图标，而非包名 | 需要认证打开页面目视 |
+| 授权失败的措辞 | 让卡片无法显示（例如在没有 answerer 的路径上调）→ 回报是"could not be shown"而**不是**"user declined" | 需要真实 UI 关闭/异常路径 |
+| 重复行的静默遮蔽 | `dsh --profile web --dump-config \| grep -c 'id: dsh-peer-sessions'` 期望 1 | 见 `MAINTENANCE.md` §十一之四：结论来自源码，未做真机重复挂载实验 |
 
 其余没有已知未验证项：曾经唯一待验的"措辞改名后的显示"，已由对端会话在**同一版本**上逐字确认（见表内「新词表逐字通过」「超时的三个轴在真机上叠加显示」「取回抬头与列表在超时上已经对称」三条——它们记的都是改名**之后**的真实输出）。
 

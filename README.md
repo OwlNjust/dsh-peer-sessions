@@ -28,12 +28,16 @@ The existing `send_message` / `list_agents` pair is built on parent-owns-child
 sidebar. An agent must never talk to a conversation the human cannot see.**
 
 The addressable set is derived from the sidebar's own visibility rule
-(`sessionVisible` in `dsh-client-ui-workspace`):
+(`sessionVisible` in `dsh-client-ui-workspace`). The two host reads — note the
+service name and the return shape, both of which the first draft of this README
+got wrong:
 
 ```js
-const archived = new Set(ctx.workspace.archivedSessionIds)
-const summaries = await ctx.sessionController.list()   // same source as the sidebar
-const addressable = summaries.filter(s =>
+// The rule in full, including WHY each hidden session is hidden, is
+// lib/addressable.js (`classify`) — that file is authoritative, this is a sketch.
+const archived = new Set(ctx.workspaceRegistry.archivedSessionIds)
+const { items } = await ctx.sessionController.list({}, signal)   // { items }, not an array
+const addressable = items.filter(s =>
       s.origin !== 'subagent'
    && !archived.has(s.sessionId)
    && !s.blank)
@@ -52,7 +56,7 @@ source for what this should do and why.
 
 **[MAINTENANCE.md](MAINTENANCE.md)** is written for whoever picks this up next,
 including a fresh agent conversation with no history: how it is wired in, the
-four invariants, and thirteen traps that have already cost real time — the loader
+four invariants, and fifteen traps that have already cost real time — the loader
 that re-applies a plugin without re-reading its module, the skill that cannot be
 symlinked, the `node_modules` link that must be a link, and the projection shapes
 that are not what you would guess.
@@ -87,7 +91,8 @@ through the existing user-questions UI, and message provenance through the exist
 
 Two conversations answering each other can go on indefinitely, so there are three
 ceilings and one timeout notice. All of them are decided BEFORE a delivery happens — a
-refused delivery spends no quota and does not advance the chain.
+refused delivery spends no quota and does not advance the chain. Every number below is a
+**config field** (see [Configuration](#configuration)); these are the defaults.
 
 | Guard | Limit | Meaning |
 |---|---|---|
@@ -100,10 +105,101 @@ refused delivery spends no quota and does not advance the chain.
 asking side sees an `Overdue` notice on its next tool call, the receiving side sees
 `[timed out · …]` in its listing, and fetching that body adds a `deadline: OVERDUE` line.
 
+## Configuration
+
+The thresholds are yours to tune, from the plugin's composition row:
+
+```yaml
+- id: dsh-peer-sessions
+  name: dsh-peer-sessions
+  config:
+    hopLimit: 5
+    rateLimit: 60
+    rateWindowMs: 60000
+    channelBudget: 500
+    inboxLimit: 100
+    requestMemory: 1000
+    pendingGraceMs: 86400000
+    hopMemoryMs: 900000
+    maxCandidates: 8
+    recentTurns: 3
+    previewMaxChars: 200
+```
+
+| Field | Default | What it bounds |
+|---|---|---|
+| `hopLimit` | `3` | How far a chain may be relayed across conversations before it is refused |
+| `rateLimit` / `rateWindowMs` | `30` / `60000` | Deliveries one pair may make inside a fixed window |
+| `channelBudget` | `200` | Lifetime deliveries on one channel |
+| `hopMemoryMs` | `900000` | How long an inbound message keeps counting as "the one being answered" |
+| `inboxLimit` | `50` | Inbox items retained per conversation |
+| `requestMemory` | `500` | How many request issuers are remembered for the reply-direction check |
+| `pendingGraceMs` | `86400000` | How long an unanswered request keeps being reported |
+| `maxCandidates` | `8` | Conversations listed before an ambiguous-title refusal summarises |
+| `recentTurns` | `3` | Trailing turns `peer_progress` summarises |
+| `previewMaxChars` | `200` | Cap on one preview line in `peer_progress` |
+
+Two things worth knowing before you edit it:
+
+- **A row's `config` replaces the whole object — it is not merged.** Naming one field is
+  fine (the rest come from the schema's declared defaults, and a test pins that), but when
+  *layers* override the same row, the later `config` object wins **entirely**. If you set
+  these from two places, list every field you want to keep in the later one.
+- **Every field has a default.** A field without one would make an omitted `config` a
+  validation failure, and a plugin that fails validation is a **warning** at startup, not
+  an error: the profile boots with this plugin silently missing. The defaults are the
+  values in the table above, so omitting `config` entirely is always safe.
+
+## Data and boundaries
+
+Everything this plugin owns is **in process memory**. Nothing is written to disk, and
+nothing is written into a session log:
+
+- Channels, grants, the inbox, pending deadlines — all of it is a map keyed by session id,
+  and **a restart clears it**. Grants die with the process; that is the documented scope of
+  "for this conversation", not an oversight.
+- Because nothing is a session event, this state **cannot be replayed or recovered from a
+  transcript**. `peer_inbox(id)`'s promise ("the body stays readable") is bounded by the
+  life of the host process.
+- Why not persist it: a custom session-event `type` is refused by the persistence reader
+  unless it carries `ignorable: true`, which a live `Session.append()` cannot set — the
+  session would then be unopenable. See `docs/design.md` H2 and `MAINTENANCE.md` §2.1.
+- Two consequences worth stating plainly: a **plugin re-apply** (the loader reloading after
+  a file change) keeps the channels, while **disabling and re-enabling the row** also keeps
+  them — they are not cleared on unload, only by the process ending.
+
+## Uninstall
+
+```sh
+./uninstall.sh
+```
+
+It undoes the four install steps, in this order:
+
+| Step | What it removes |
+|---|---|
+| 1 | the deployed skill `~/.dsh/skills/peer-session/` |
+| 2 | the hand-written `insert` row in the profile's `cordis.patch.yml` (backed up first) |
+| 3 | the profile dependency (`dsh plugin remove dsh-peer-sessions`) |
+| 4 | this package's `node_modules` symlink |
+
+**Restart the profile** afterwards — the plugin stays loaded until the process restarts.
+Route-A installs (through the plugin manager) are removed in the manager instead; run this
+script only for the route you actually used, and check afterwards:
+
+```sh
+grep -c dsh-peer-sessions ~/.dsh/profiles/web/cordis.patch.yml   # → 0
+```
+
+
 ## Installation
 
-**Two routes exist; use one.** Both activate the same plugin id, and using both
-installs the plugin twice.
+**Two routes exist; use one.** Both activate the same plugin id. Nothing rejects the
+duplication — the composer lists the row twice and the loader mounts that id **once, last
+one wins, with no warning** (measured on 0.2.0-rc.2; see `MAINTENANCE.md` §十一之四). So
+the cost is not a crash but a **silently shadowed row**: whichever copy comes later decides
+the row's `config`, which is the kind of thing you discover after an afternoon of
+wondering why a setting did nothing.
 
 ### Route A — as a bundle (desktop "Manage plugins" / repository URL)
 
@@ -139,8 +235,8 @@ composition row, and copies the skill. `link:` installs are live — edit and
 restart.
 
 > `./install.sh` **skips** appending that row when it finds this package is
-> already an active bundle of the profile (i.e. installed via Route A). Both
-> routes in place would activate the plugin twice.
+> already an active bundle of the profile (i.e. installed via Route A), because a
+> duplicate row silently shadows the other one (see above).
 
 By hand instead:
 
@@ -169,15 +265,20 @@ Restart the web profile, then check with `/peers`.
 ## Development
 
 ```sh
-node --test      # 25 tests, no harness required
+npm run link     # once per machine: links node_modules to the running harness
+npm test         # the whole suite; no harness process required
 ```
 
-The tests exercise the real `@deepseek-ai/dsh-llm` message construction and a fake
-host context, so every invariant is covered without a running process.
+The tests exercise the real `@deepseek-ai/dsh-llm` message construction, and the
+real `@deepseek-ai/dsh-session-format-v3-to-v4` admission check as an oracle, plus
+a fake host context — so every invariant is covered without a running process.
+
+The link is a **prerequisite, not a convenience**: a bare `@deepseek-ai/*`
+specifier resolves against the importing file's real path, so on a machine that
+never ran `scripts/link-deps.sh` the suite fails at import. The current test count
+is whatever `npm test` prints on its last line.
 
 ## Status
 
-**M1 implemented**, awaiting a real two-conversation run. See
-[docs/design.md §13](docs/design.md) for the milestone breakdown and the
-acceptance walkthrough, and §12 for the runtime facts established while
-implementing — two of which corrected the draft design.
+**Live.** The design is frozen in [docs/design.md](docs/design.md) (§12 records
+what was verified on a real host, §13 the milestone breakdown).
