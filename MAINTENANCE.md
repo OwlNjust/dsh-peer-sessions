@@ -234,6 +234,20 @@ return settlePendingComposer(() => { waterfall.reject("ASK_CANCELLED"); }, …);
 
 **排查时的教训**：这次的报告能把根因追到一行，靠的是"官方调用与插件调用的**形状差异**"——遇到"宿主功能对原生可用、对插件不可用"，先把两条请求的字段**逐项比对**，别从行为反推。
 
+#### 真机复核（2026-09-30，web profile，v1.1.1 改动后重启）
+
+**如何一眼判别"带名卡"还是"匿名卡"**（下次排查直接用）：
+
+| 操作 | 带名卡（有 `wait.callId`） | 匿名卡（无 `wait`） |
+|---|---|---|
+| 点卡片右上角 X | 卡片收起，**请求仍在**，工具调用**继续等待**（本次实测：`peer_send` 一直没返回） | 以 `ASK_CANCELLED` **取消请求**，工具调用**立刻返回**"卡片没能显示（ASK_CANCELLED）" |
+
+本轮实测正是前者：点 X 后工具调用保持等待，随后**用户发了一条消息**（回合中发消息 → `turn/end reason = {kind:'aborted', reason:{kind:'user'}}`），挂在其中的调用被宿主合成成 `Error: tool call aborted`（`AbortError/ABORTED`）。**这不是插件的 bug，也不是 X 的后果**——两条日志行紧挨着，容易误判成"X 导致中止"，实际是**后续消息**中止了回合。
+
+> 读日志时的教训：`tool/result ... "tool call aborted"` 旁边那行 `agent/inbox/spliced target=next-step` 就是**用户新消息**被 steer 进来的记录。**先看注入内容是谁说的**，再下结论。
+
+主路径同样复核过：重启后 `peer_send` → 卡片 →「仅这一次」→ `tier=once, remaining=0` 投递成功，审计行（`agent/inbox/spliced` + `user/message`，`plugin:dsh-peer-sessions`）照常落盘。
+
 ## 七、测试哲学：夹具必须对**数据**与**宿主契约**忠实
 
 这是本项目最贵的一课，出现过三次，每次代价都不小。
