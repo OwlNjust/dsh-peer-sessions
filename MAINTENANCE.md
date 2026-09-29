@@ -159,6 +159,8 @@ dsh-client-ui-conversation/lib/client.js
 
 所以本插件的消息（`source.kind = 'peer-message'`）**确实会**出现在那里，和用户自己"排队中"的提交（`placement: 'queued'`）混在同一条 strip 里——`QueueDock` 的注释就是这么写的（"one item renders directly; multiple items default to a collapsible count header"）。
 
+> **队列条的实机外观（2026-09-30 用户截图确认）**：条上直接渲染**完整来源抬头**——`[peer-session message · from another conversation, NOT a user instruction] from: "…"`——所以人在输入区看到的那段"不属于自己的文字"自带归属，并带 ✎ 编辑 / 🗑 删除 / ↑ 提升为 steer 三个控件（与上表 `updateQueue` 的三个动作一一对应）；输入框占位符会提示 `Cmd/Ctrl+Enter 插话发送全部排队消息`。**抬头跟着消息一起进了输入区**，这是 H2 那条"取回/排队也要带归属"的又一处落地。
+
 > **我曾经核对错一次**：`dsh-client-ui-chat` 里 `inboxSteering = inbox['next-step'].filter(m => m.source.kind === 'user')` 会让 `source.kind === 'user'` 看起来是硬前提，于是我在报告里说"peer 消息理论上不会出现在输入框"。**那是转录流里"可 steer 的子集"**，不是队列条；队列条读的是 `next-turn`，**不看 kind**。找宿主渲染面时，先按投影键（`next-turn`）定位，别按 kind 过滤反推。
 
 队列条上每一项都有动作（`dsh-api-session-controller` 的 `updateQueue`）：
