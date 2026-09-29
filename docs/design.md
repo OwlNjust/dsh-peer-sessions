@@ -318,6 +318,8 @@ peer 消息**不能**：批准任何东西、修改任何权限、发起新的 p
 
 | **宿主两处布局都要覆盖**（同一次修复的第二轮） | 第一版 `link-deps.sh` 的"向上搜索"只认 **npx 缓存**布局，而**全局安装**把依赖打包在 `@deepseek-ai/dsh/node_modules/` **内部**，外层 `node_modules` 里没有 `dsh-tools`——脚本于是回退到 `profiles/node_modules`，看似成功却没选到宿主。现在两层都查（`$d/node_modules` 与 `$d/*/node_modules`）。实测：改后插件与宿主 realpath **完全一致** |
 | **宿主升级会悄悄拆散模块实例**（v1.0.2 后实测） | 把 DSH 从 `0.1.5-rc.3` 升到 `0.1.7-rc.2` 后，`link-deps.sh` 指向的 `$DSH_HOME/profiles/node_modules` **仍是旧版本**（它链到全局安装那份），而宿主跑的是 npx 缓存里的新实例：插件加载 `dsh-llm 0.1.5-rc.3`、宿主是 `0.1.7-rc.2`。**正是坑 3 警告的身份分裂**，而且**不报错**——只有比对 `readlink -f` 才看得出来。已修：`link-deps.sh` 改为**优先从 PATH 上的 `dsh` 反推宿主实例**，`profiles/node_modules` 降为兜底 |
+| **0.2.0 要求声明 `dsh.bundle`**（v1.0.3） | dsh 0.2.0 的插件管理器用 `inspectionOf()` 判定 `dsh.bundle` **是否为对象**，否则报 `not-a-bundle` 并**回滚 profile**——而 pnpm 那一步是**成功**的，所以"装上了"与"能当插件管理"是两件事。本包 v1.0.2 及以前没有 `dsh` 字段，从桌面端装必失败。已声明 `"dsh": {"bundle": {"patch": "./cordis.patch.yml"}}`（官方写法：`dsh-base` 用单文件，`dsh-web-app` 用数组）。**离线验证法**：`bundlePatchPaths` → `loadOverlayPatches` 能解析出 insert 行即可，不必真装 |
+| **两条安装路线不可混用**（v1.0.3） | 路线 A＝包声明 `dsh.bundle` 并进入 profile 的 `dsh.profile.bundles`（装完自动生效，但桌面端是 **git 快照**、发版要更新）；路线 B＝profile 用户 patch 层**手写** insert 行（`link:` **实时**）。两者激活**同一个 id**，同时存在就是**装两次**。`install.sh` 已加守卫：若本包已是该 profile 的活跃组合包，就**拒绝**再追加手写行。**排查过的安全性**：给包加 `dsh.bundle` 不影响已有 web profile——组合树只应用 `bundles` 里列出的包，而本包在 web profile 走的是路线 B |
 ### v1.0.0 审计（两个独立审查者 + 真机）
 
 发布第一版正式版之前做了一次完整审计：两个独立子代理各管一半（**生命周期/状态寿命/并发** 与 **边界/不可信输入/错误路径**），各自用真机驱动 `lib/*.js` 的探针取证，不看我自己的解释。**共 20 项发现，其中 11 项是真 bug**，全部已修并补了回归测试（测试 70 → 79）。值得单独记的几项：

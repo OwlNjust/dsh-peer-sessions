@@ -1,6 +1,6 @@
 {
   "name": "dsh-peer-sessions",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Peer session interop for DeepSeek Harness: symmetric, user-granted channels between conversations at the same level — no parent, no child.",
   "license": "MIT",
   "type": "module",
@@ -48,5 +48,10 @@
   ],
   "engines": {
     "node": ">=20"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
   }
 }

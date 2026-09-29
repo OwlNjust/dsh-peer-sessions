@@ -470,6 +470,47 @@ Windows 侧显示的"已修改"是视错觉——见坑 13。
 - **拒绝文案要给"出路"，并且明确排除死路。** 说"不允许无限接力"是不够的；要让读者知道**换发法没用、要授权没用**，以及**什么才有用**。
 - **对端会话的报告值得当真逐条核。** 这份报告 6 条全部成立，其中 P0 两条是我自己在真机上也没遇到的（我从没用完过跳数）。
 
+## 十一之四、dsh 0.2.0：插件要声明 `dsh.bundle`，以及两条安装路线
+
+**背景**：另一个插件（`dsh-deepseek-balance`）的作者在桌面端用「管理插件」安装时踩到一串坑，主动把结论发给了我——它直接适用于本包。
+
+### 0.2.0 的硬要求：`dsh.bundle`
+
+插件管理器用 `inspectionOf()` 判定**`dsh.bundle` 是否为对象**（源码：`dsh-plugin-manager/lib/index.js`，`const bundle = typeof declared.bundle === "object" && declared.bundle !== null`）。不是对象就拒绝并回滚 profile：
+
+> 插件安装失败 / 这个包没有声明组合包，不能作为插件管理（`not-a-bundle`）
+
+pnpm 那一步**是成功的**，失败发生在管理器随后的校验——所以"装上了"和"能当插件管理"是两件事。
+
+**本包的缺口与修法**：v1.0.2 及以前 `package.json` **没有 `dsh` 字段**（只有 `cordis.patch.yml` 里的 insert 行），所以从桌面端装必失败。已补：
+
+```json
+"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+```
+
+官方写法参考：`dsh-base` = `{"bundle":{"patch":"./cordis.patch.yml"}}`；`dsh-web-app` 的 `patch` 用**数组**列多个文件。声明 `bundle` 之后，包里那份 `cordis.patch.yml` 成为**组合层**，装完自动生效，**不需要手改 profile**。
+
+**离线验证**（不必真装一遍，用 `@deepseek-ai/dsh-app-boot` 导出的真实 helper）：
+`bundlePatchPaths(packageDir, manifest.dsh.bundle)` → `loadOverlayPatches(binName, file)`，断言能解析出 insert 行。本包实测解析出 `[{"insert":[{"id":"dsh-peer-sessions","name":"dsh-peer-sessions"}]}]`。
+> **坑**：`resolveBundleDir` 返回的是 `<profile>/node_modules/<pkg>`（node_modules 路径，**不是 realpath**），断言里别写成 realpath，否则误报失败。
+
+### 两条路线**不可混用**
+
+| | 路线 A：组合包 | 路线 B：本地克隆 + `install.sh` |
+|---|---|---|
+| 载体 | 包声明 `dsh.bundle` + 进 profile 的 `dsh.profile.bundles` | profile 用户 patch 层里**手写** insert 行 |
+| 生效 | 装完自动 | 手改 profile 后重启 |
+| 更新 | **git 快照**，每次发版要在管理器里更新一次 | `link:` **实时**，改代码重启即生效 |
+
+两者会激活**同一个 id**，**同时存在就是装两次**。为此 `install.sh` 第 3 步加了守卫：若发现本包已是该 profile 的活跃组合包，就**拒绝**再追加手写行。
+
+**排查过的安全性**：给包加 `dsh.bundle` **不影响已有 web profile**——组合树只应用 `dsh.profile.bundles` 里列出的组合包，而本包在 web profile 里是路线 B（不在 `bundles` 里）。实测：web profile `bundles = [dsh-base, dsh-web-app, dsh-deepseek-balance]`，不含本包；用户 patch 层里恰好 1 条手写 insert 行，不重复。
+
+### 0.2.0 另外两点
+
+- **版本兼容校验**：安装时会校验插件声明的 **DSH peer 范围**，不兼容需用户显式豁免（存 profile 的 `compatibility.json`；CLI `dsh plugin --profile <p> version-exemptions` / `allow-version … --accept-risk`）。**本包刻意不声明 `peerDependencies`**——免得跨版本升级时反被判"不兼容"。
+- **官方 CLI 拒绝对 `desktop` profile 做插件管理**，桌面端只能用它自己的 UI；桌面端还有**独立状态文件**（Windows 侧），与 WSL 那份互不相干。
+
 ## 十二、进一步阅读
 
 | 想了解 | 去哪 |

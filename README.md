@@ -102,6 +102,32 @@ asking side sees an `Overdue` notice on its next tool call, the receiving side s
 
 ## Installation
 
+**Two routes exist; use one.** Both activate the same plugin id, and using both
+installs the plugin twice.
+
+### Route A — as a bundle (desktop "Manage plugins" / repository URL)
+
+This package declares `dsh.bundle`, so dsh **0.2.0+**'s plugin manager treats it
+as a **composition layer**: installing it takes effect by itself, with **no
+profile file edited by hand**.
+
+- Desktop: "Manage plugins" → paste the repository URL (or the npm name).
+- CLI (except the `desktop` profile — the official CLI refuses plugin management
+  for it, so the desktop app must use its own UI):
+
+```sh
+dsh plugin --profile <profile> add <repository-url-or-package-name>
+```
+
+> **A hard requirement in 0.2.0**: the manager's `inspectionOf()` accepts a
+> package only when `dsh.bundle` is an object; otherwise it refuses with
+> `not-a-bundle` and rolls the profile back. Declared here since v1.0.3.
+
+The desktop installs from a **git snapshot**, not your working copy, so each
+release needs an update in the manager.
+
+### Route B — local clone + `./install.sh`
+
 ```sh
 ./install.sh
 ```
@@ -109,7 +135,12 @@ asking side sees an `Overdue` notice on its next tool call, the receiving side s
 It does four things: links this package's `node_modules` to the profile's (so
 `@deepseek-ai/dsh-llm` and `@deepseek-ai/dsh-tools` resolve, on the **same module
 instances** the harness already loaded), adds the profile dependency, appends the
-composition row, and copies the skill.
+composition row, and copies the skill. `link:` installs are live — edit and
+restart.
+
+> `./install.sh` **skips** appending that row when it finds this package is
+> already an active bundle of the profile (i.e. installed via Route A). Both
+> routes in place would activate the plugin twice.
 
 By hand instead:
 

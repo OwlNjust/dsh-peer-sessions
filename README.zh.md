@@ -88,15 +88,36 @@ const addressable = summaries.filter(s =>
 
 ## 安装
 
+**两条路线，只能选一条。** 它们都会激活同一个插件 id；**同时使用会把插件装两次**。
+
+### 路线 A：作为组合包安装（桌面端「管理插件」/ 仓库地址）
+
+本包声明了 `dsh.bundle`，所以 dsh **0.2.0+** 的插件管理器会把它当作**组合层**：装完自动生效，
+**不需要手改任何 profile 文件**。
+
+- 桌面端：「管理插件」→ 填仓库地址（或用 npm 名）。
+- CLI（`desktop` profile 除外——官方明确拒绝对它做插件管理，桌面端只能用它的 UI）：
+
+```sh
+dsh plugin --profile <profile> add <仓库地址或包名>
+```
+
+> **0.2.0 的硬要求**：管理器用 `inspectionOf()` 判定 `dsh.bundle` 是否为对象，否则报
+> `not-a-bundle`「这个包没有声明组合包，不能作为插件管理」并回滚。本包自 v1.0.3 起已声明。
+
+桌面端装的是 **git 快照**，不跟随本地仓库改代码；每次发版都要在管理器里更新一次。
+
+### 路线 B：本地克隆 + `./install.sh`
+
 ```sh
 ./install.sh
 ```
 
-它会做四件事：把本包的 `node_modules` 软链到 profile 的（这样 `@deepseek-ai/dsh-llm`
-和 `@deepseek-ai/dsh-tools` 才能解析，而且指向**与宿主同一份模块实例**）、加 profile 依赖、
-追加 composition 行、部署技能。
+它会做四件事：把本包的 `node_modules` 软链到**宿主实际在用的那份实例**（这样
+`@deepseek-ai/dsh-llm` 和 `@deepseek-ai/dsh-tools` 才能解析，且与宿主同一份模块）、
+加 profile 依赖、追加 composition 行、部署技能。**`link:` 安装是实时的**，改代码重启即生效。
 
-手动安装：
+### 手动安装（路线 B 的展开）
 
 ```sh
 cd ~/.dsh/profiles/web
@@ -110,6 +131,9 @@ dsh plugin --profile web add link:/path/to/dsh-peer-sessions
     - id: dsh-peer-sessions
       name: dsh-peer-sessions
 ```
+
+> `./install.sh` 会**跳过**追加那一行——如果它发现本包已经是该 profile 的活跃组合包（路线 A 装过）。
+> 两条路线同时生效会让插件被激活两次。
 
 复制技能——是**复制**不是软链，因为技能提供者用 `lstat` 语义列举技能根，
 软链的目录永远不会被发现：

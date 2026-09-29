@@ -80,8 +80,30 @@ say ""
 
 # ------------------------------------------------------- 3. patch layer row
 say "[3/4] patch layer row  (${PATCH_FILE})"
+# Two install routes exist and they must NOT both be active:
+#   route A (bundle)  — the package declares `dsh.bundle`, is listed in the
+#                       profile's `dsh.profile.bundles`, and its own
+#                       cordis.patch.yml is applied by the composer;
+#   route B (manual)  — a hand-written insert row in this user patch layer.
+# Both apply the same row id, and leaving both in place activates the plugin
+# twice. So if the package is already an active bundle of this profile, the
+# hand-written row is exactly what must NOT be added.
+provider_in_bundles() {
+  [ -f "${PROFILE_DIR}/package.json" ] || return 1
+  node -e '
+    const fs = require("fs")
+    const manifest = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+    const bundles = manifest.dsh?.profile?.bundles ?? []
+    process.exit(bundles.includes(process.argv[2]) ? 0 : 1)
+  ' "${PROFILE_DIR}/package.json" "${ROW_ID}" 2>/dev/null
+}
+
 if grep -q "${ROW_ID}" "${PATCH_FILE}"; then
   say "      already present — leaving it alone"
+elif provider_in_bundles; then
+  say "      '${ROW_ID}' is already an active bundle of this profile (installed"
+  say "      through the plugin manager). Adding the manual row would activate"
+  say "      it twice, so this step is skipped — nothing to do."
 else
   BACKUP="${PATCH_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
   cp -p "${PATCH_FILE}" "${BACKUP}"
