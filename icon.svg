@@ -1,0 +1,12 @@
+<svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Two peers: the same size, neither above the other. -->
+  <circle cx="9" cy="18" r="5" fill="#6E56CF"/>
+  <circle cx="27" cy="18" r="5" fill="#3E63DD"/>
+  <!-- A channel is symmetric, so it carries a message each way. -->
+  <g stroke="#8A8F98" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M14.5 15h7"/>
+    <path d="M21.5 15l-2.6-2.6M21.5 15l-2.6 2.6"/>
+    <path d="M21.5 21h-7"/>
+    <path d="M14.5 21l2.6-2.6M14.5 21l2.6 2.6"/>
+  </g>
+</svg>

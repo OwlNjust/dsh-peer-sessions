@@ -13,15 +13,19 @@
     "url": "https://github.com/OwlNjust/dsh-peer-sessions/issues"
   },
   "homepage": "https://github.com/OwlNjust/dsh-peer-sessions#readme",
+  "icon": "./icon.svg",
   "exports": {
     ".": {
       "default": "./lib/index.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
     "./package.json": "./package.json"
   },
   "files": [
     "lib",
+    "locale/*.json",
+    "icon.svg",
     "skill",
     "scripts",
     "docs/design.md",

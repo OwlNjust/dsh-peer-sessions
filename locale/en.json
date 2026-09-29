@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Peer session channels",
+    "description": "Symmetrically user-granted channels between conversations at the same level: neither outranks the other, and every message says which conversation spoke."
+  }
+}

@@ -11,12 +11,13 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readdirSync, readFileSync } from 'node:fs'
+import { readdirSync, readFileSync, statSync } from 'node:fs'
 
 import { classify, listAddressable, resolveTarget, labelOf, stripInvisible, displayToken } from '../lib/addressable.js'
 import {
   PeerStore,
   pairKey,
+  STORE_DEFAULTS,
   CHANNEL_BUDGET,
   HOP_LIMIT,
   RATE_LIMIT,
@@ -27,15 +28,16 @@ import {
 } from '../lib/store.js'
 import { buildPeerMessage, buildDeliveryNotice, PEER_KIND, NOTICE_KIND } from '../lib/messages.js'
 import { translator, resolveLocale, normalizeLocale, DEFAULT_LOCALE } from '../lib/i18n.js'
-import { isRuntimeRoot } from '../lib/consent.js'
-import { PeerCore, PeerRefusal } from '../lib/core.js'
+import { isRuntimeRoot, askGrant } from '../lib/consent.js'
+import { PeerCore, PeerRefusal, CORE_DEFAULTS } from '../lib/core.js'
 import { registerTools } from '../lib/tools.js'
 import { registerCommands } from '../lib/commands.js'
 
 // ---------------------------------------------------------------- test doubles
 
-/** The plugin entry, imported once: it holds module-scoped state by design. */
-const pluginEntry = (await import('../lib/index.js')).default
+// The plugin entry, imported once: it holds module-scoped state by design.
+// Imported as a NAMESPACE, never `.default` — see the export-shape test below.
+const pluginEntry = await import('../lib/index.js')
 
 const SELF = 'session-self'
 const PEER = 'session-peer'
@@ -237,12 +239,38 @@ test('a null projection value is not treated as an object', () => {
   assert.equal(labelOf(ctx, nullTitle), 'proj')
 })
 
-// The three shapes the title projection actually takes in the wild, all
-// confirmed against the on-disk projection cache.
-test('every real title projection shape resolves to the title text', () => {
+// The title projection's admitted values, taken from the producer that defines
+// the key rather than from what this plugin happens to tolerate. The previous
+// version of this test called `{ver, seq, val}` and `{title, source}` "the three
+// shapes the title projection actually takes in the wild, all confirmed against
+// the on-disk projection cache" — it had confused the cache's own ROW format
+// with the `values` map this plugin reads. Only the string and null are real.
+test('the Host admits exactly a non-empty string or null as a title value', async () => {
+  const { titleProjectionDefinition } = await import('@deepseek-ai/dsh-session-title')
+  const schema = titleProjectionDefinition.wire.viewSchema
+
+  for (const admitted of ['Paper pipeline', null]) {
+    assert.equal(schema.safeParse(admitted).success, true, `${JSON.stringify(admitted)} is admitted`)
+  }
+  for (const rejected of ['', { ver: 1, seq: 53, val: 'Paper pipeline' }, { title: 'Paper pipeline', source: 'model' }]) {
+    assert.equal(schema.safeParse(rejected).success, false, `${JSON.stringify(rejected)} is NOT a title value`)
+  }
+
+  // And the plugin resolves every ADMITTED value to that title.
+  const ctx = fakeCtx({ items: [] })
+  const row = (value) => summary('x', { projections: { asOfSeq: 0, values: { title: value } } })
+  assert.equal(labelOf(ctx, row('Paper pipeline')), 'Paper pipeline')
+  assert.equal(labelOf(ctx, row(null)), 'x', 'an unset title falls back to the derived label')
+})
+
+// Forward-compatibility, pinned on purpose: these two shapes are the ones an
+// older or future reader could surface (a checkpoint row, a title snapshot), and
+// the test above proves the Host does not admit them today. They must keep
+// resolving rather than being "simplified" away as unreachable — that is what
+// makes dropping the object probe a deliberate decision instead of an accident.
+test('the title reader also tolerates the snapshot and checkpoint shapes', () => {
   const ctx = fakeCtx({ items: [] })
   const cases = [
-    ['bare string', 'Paper pipeline'],
     ['cached record', { ver: 1, seq: 53, val: 'Paper pipeline' }],
     ['title snapshot', { title: 'Paper pipeline', source: 'model', eventSeq: 53, updatedAt: 1 }],
   ]
@@ -393,6 +421,24 @@ test('connect prefers the literal title over eating a trailing tier word', async
   assert.ok(channel, 'a channel was opened')
   // It connected to the conversation literally named "Design session"...
   assert.equal(core.store.other(channel, SELF), PEER, 'the literal title wins')
+})
+
+// The command path reports the same distinction as the tool path: a card that
+// could not be shown is not a refusal, and the reader is offered the way out
+// (name a tier, which skips the card).
+test('/peer connect reports an unusable card as a failure, not a refusal', async () => {
+  const ctx = fakeCtx({
+    items: [titled(SELF, 'Me'), titled(PEER, 'Peer')],
+    agentIds: [SELF, PEER],
+    grant: null,
+  })
+  const core = new PeerCore(ctx)
+  const handlers = captureCommands(core)
+  const result = await handlers.peer({ agent: { id: SELF }, rawInput: 'connect Peer', signal: undefined })
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /没能显示/, 'the human is told the card failed')
+  assert.doesNotMatch(result.text, /已拒绝/, 'and NOT that they declined it')
+  assert.equal(core.store.between(SELF, PEER), undefined, 'no channel either way')
 })
 
 test('stripInvisible removes zero-width and bidi-control characters', () => {
@@ -679,6 +725,55 @@ test('deliver sends nothing when the human declines', async () => {
   assert.equal(core.store.between(SELF, PEER), undefined)
 })
 
+// A card that never reached a human is NOT a decision. Both used to arrive as
+// `null` and were reported to the model as "The user declined the channel …
+// Do not retry", which described a retryable surface failure as the human's
+// explicit will — and told the model not to try again.
+test('a card that cannot be shown is unavailable, not declined', async () => {
+  const ctx = fakeCtx({ items: [summary(SELF), summary(PEER)], agentIds: [SELF, PEER], grant: null })
+  const core = new PeerCore(ctx)
+  const result = await core.deliver({
+    selfAgent: ctx.agents.get(SELF),
+    selfLabel: 'Me',
+    peerEntry: { sessionId: PEER, label: 'Peer', running: true, projections: {} },
+    payload: { kind: 'notice', summary: 'hi' },
+  })
+  assert.equal(result.outcome, 'consent-unavailable')
+  assert.equal(result.reason, 'ask-failed', 'an error with no stable code is an unknown surface failure')
+  assert.equal(ctx.received.length, 0, 'nothing may be delivered either way')
+})
+
+test('a cancelled card is a decline, because the human closed it', async () => {
+  const ctx = fakeCtx({ items: [summary(SELF), summary(PEER)], agentIds: [SELF, PEER], grant: 1 })
+  ctx.userQuestions.ask = async () => {
+    const error = new Error('aborted before the user answered')
+    error.code = 'ASK_ABORTED'
+    throw error
+  }
+  const core = new PeerCore(ctx)
+  const result = await core.deliver({
+    selfAgent: ctx.agents.get(SELF),
+    selfLabel: 'Me',
+    peerEntry: { sessionId: PEER, label: 'Peer', running: true, projections: {} },
+    payload: { kind: 'notice', summary: 'hi' },
+  })
+  assert.equal(result.outcome, 'declined')
+  assert.equal(result.reason, undefined, 'the delivery outcome stays a plain decline')
+})
+
+test('askGrant refuses to ask for a caller with no human answerer', async () => {
+  const ctx = fakeCtx({ items: [summary(SELF)], agentIds: [] })
+  const answer = await askGrant(ctx, {
+    agent: { id: SELF },
+    peerLabel: 'Peer',
+    selfLabel: 'Me',
+    signal: undefined,
+    t: translator('en'),
+  })
+  assert.deepEqual(answer, { outcome: 'unavailable', reason: 'not-runtime-root' })
+  assert.equal(ctx.asked.length, 0, 'and it must not reach the surface at all')
+})
+
 test('deliver queues through followup (never steer) once the human consents', async () => {
   const ctx = fakeCtx({
     items: [summary(SELF), summary(PEER)],
@@ -817,6 +912,41 @@ test('an unknown replyTo does not unlock a spent once grant', async () => {
     payload: { kind: 'reply', summary: 'unsolicited', replyTo: 'req-does-not-exist' },
   })
   assert.equal(ctx.asked.length, 2)
+})
+
+// The extracted state machine resolves which grant a delivery runs on, and its
+// ORDER is load-bearing: the exchange is consumed synchronously so two answers to
+// the same request cannot both observe an unspent grant. Pinned directly, because
+// the delivery-level tests can only see the outcome.
+test('resolveGrant spends a once exchange synchronously, and only for its own answer', () => {
+  const store = new PeerStore()
+  const core = new PeerCore(fakeCtx({ items: [] }), store)
+  const payload = { kind: 'request', requestId: 'req-1' }
+
+  // A fresh session channel is neither spent nor ridden.
+  const session = store.open({ a: SELF, b: PEER, tier: 'session', by: SELF })
+  assert.deepEqual(core.resolveGrant(SELF, PEER, payload), { channel: session, ridesExistingGrant: false })
+  store.revoke(session)
+
+  // A once channel opens with one delivery; the request it carries spends it.
+  const once = store.open({ a: SELF, b: PEER, tier: 'once', by: SELF })
+  store.noteRequest(once, 'req-1', SELF)
+  assert.equal(store.spend(once), true)
+  assert.equal(once.remaining, 0)
+
+  // The peer's answer names the request this grant carried: it rides, and the
+  // grant is revoked here and now.
+  const ridden = core.resolveGrant(PEER, SELF, { kind: 'reply', replyTo: 'req-1' })
+  assert.equal(ridden.ridesExistingGrant, true)
+  assert.equal(ridden.channel, once)
+  assert.equal(store.between(SELF, PEER), undefined, 'spent before anything could await')
+
+  // An unrelated second message on an exhausted grant gets no channel at all,
+  // so the caller must ask a human again.
+  const spent = store.open({ a: SELF, b: PEER, tier: 'once', by: SELF })
+  store.spend(spent)
+  assert.deepEqual(core.resolveGrant(SELF, PEER, { kind: 'notice' }), { channel: undefined, ridesExistingGrant: false })
+  assert.equal(store.between(SELF, PEER), undefined, 'and the spent channel is cleaned up')
 })
 
 // The unlock is directional: naming a request that the REPLIER itself issued
@@ -1093,7 +1223,7 @@ test('the locale is read through describe(), the contract the Host has', () => {
 // emitting in 0.1.7-rc.2 — so the live re-registration below never ran in
 // production. This drives the real event name through the real entry.
 test('a language change re-registers the commands on the event the Host emits', async () => {
-  const plugin = (await import('../lib/index.js')).default
+  const plugin = await import('../lib/index.js')
   const zh = translator('zh')
   const en = translator('en')
 
@@ -1291,6 +1421,205 @@ test('every command definition registers with a name and a handler', () => {
     core,
   )
   assert.deepEqual(names, ['peers', 'peer'])
+})
+
+// A registration that throws halfway must not leave the first command behind.
+// `registerCommands` re-runs on every language change, and the commands scope
+// only unwinds what was handed to it — so a leaked `/peers` would be permanent
+// for the life of the profile, once per failed re-registration.
+test('a failed command registration unwinds the one that succeeded', () => {
+  const ctx = fakeCtx({ items: [] })
+  const core = new PeerCore(ctx)
+  const disposed = []
+  let calls = 0
+  const commands = {
+    register() {
+      calls += 1
+      if (calls === 2) throw new Error('second registration refused')
+      return () => disposed.push('peers')
+    },
+  }
+  assert.throws(() => registerCommands(commands, core), /second registration refused/)
+  assert.deepEqual(disposed, ['peers'], 'the first command must be unwound before the throw propagates')
+})
+
+// ------------------------------------------------- configuration & export shape
+
+// The loader's own `unwrapExports` decides what a plugin module exposes, and it
+// returns the `default` export ALONE when one exists. A `Config` declared beside
+// a default export is therefore dropped with no error at all: the schema never
+// runs, `apply` keeps receiving `undefined`, and `Config.listConfigs` reports
+// `absent` forever. This test calls the REAL loader method rather than restating
+// the rule, so the day that rule changes, this fails instead of the plugin
+// silently losing its config.
+test('the plugin namespace survives the loader, so Config cannot be dropped', async () => {
+  const { default: Loader } = await import('@deepseek-ai/cordis-plugin-loader')
+  const unwrapped = Loader.prototype.unwrapExports(pluginEntry)
+
+  assert.equal(typeof unwrapped.apply, 'function', 'the loader must find apply')
+  assert.ok(Array.isArray(unwrapped.inject), 'and inject')
+  assert.notEqual(unwrapped.Config, undefined, 'and Config — a default export would hide it')
+  assert.equal('default' in pluginEntry, false, 'so the module must not export one')
+})
+
+// The schema is what a user reads and what cordis validates against; the numbers
+// live next to the code that enforces them. One drift between the two would be
+// invisible — a documented default that the plugin does not actually use.
+test('the Config schema defaults are exactly the module defaults', async () => {
+  const resolved = pluginEntry.Config['~standard'].validate(undefined)
+  assert.equal(resolved.issues, undefined)
+  assert.deepEqual(resolved.value, { ...STORE_DEFAULTS, ...CORE_DEFAULTS })
+})
+
+// A row that omits `config` must still activate. Cordis validates the row's
+// config against this schema, and a field with no default would fail that
+// validation — at which point the plugin is only a startup WARNING and is
+// silently missing (MAINTENANCE.md §十一之七). So: no field without a default.
+test('an omitted config still resolves to a complete set of limits', () => {
+  const resolved = pluginEntry.Config['~standard'].validate(undefined)
+  assert.equal(resolved.issues, undefined, 'omitting config must not fail validation')
+  assert.deepEqual(Object.keys(resolved.value).sort(), Object.keys({ ...STORE_DEFAULTS, ...CORE_DEFAULTS }).sort())
+
+  // A row's `config` REPLACES the whole object rather than merging, so a partial
+  // config must come back complete — otherwise naming one field would silently
+  // reset the rest to undefined.
+  const partial = pluginEntry.Config['~standard'].validate({ hopLimit: 5 })
+  assert.equal(partial.issues, undefined)
+  assert.equal(partial.value.hopLimit, 5)
+  assert.equal(partial.value.rateLimit, STORE_DEFAULTS.rateLimit)
+  assert.equal(partial.value.maxCandidates, CORE_DEFAULTS.maxCandidates)
+
+  // And an out-of-range value is refused rather than clamped silently.
+  assert.notEqual(pluginEntry.Config['~standard'].validate({ hopLimit: 0 }).issues, undefined)
+})
+
+test('a configured threshold is what the store and the core actually enforce', async () => {
+  const ctx = fakeCtx({ items: [summary(SELF), summary(PEER)], agentIds: [SELF, PEER], grant: 1, revive: true })
+  const store = new PeerStore({ hopLimit: 1 })
+  const core = new PeerCore(ctx, store, translator(DEFAULT_LOCALE), { maxCandidates: 1, recentTurns: 1, previewMaxChars: 10 })
+
+  // The store adopted it...
+  assert.equal(store.hopLimit, 1)
+  // ...and the core refuses on it, before any consent card is raised.
+  store.noteInboundHop(SELF, 1, 'a-third-conversation')
+  await assert.rejects(
+    () =>
+      core.deliver({
+        selfAgent: ctx.agents.get(SELF),
+        selfLabel: 'Me',
+        peerEntry: { sessionId: PEER, label: 'Peer', running: true, projections: {} },
+        payload: { kind: 'notice', summary: 'one relay too far' },
+      }),
+    (error) => error instanceof PeerRefusal && /跳|hop/.test(error.message),
+  )
+  assert.equal(ctx.asked.length, 0, 'a refusal must not cost the human a card')
+
+  // A changed config is ADOPTED, not ignored — the store outlives one apply.
+  store.configure({ hopLimit: 9 })
+  assert.equal(store.hopLimit, 9)
+  assert.equal(store.rateLimit, RATE_LIMIT, 'fields the new config omits keep their defaults')
+
+  // The presentation preferences reach the copies the model reads.
+  const candidates = [1, 2, 3].map((n) => ({ sessionId: `s-${n}`, label: `Twin ${n}`, running: false, projections: {} }))
+  await assert.rejects(
+    () => core.resolveOrRefuse('Twin', SELF, undefined),
+    (error) => error instanceof PeerRefusal && error.message.split('\n').filter((line) => /Twin/.test(line)).length === 1,
+  )
+})
+
+// A misspelled field is the one config mistake the Host cannot catch:
+// schemastery passes unknown keys through, so `hoplimt` would be accepted,
+// ignored, and silent. It goes to `ctx.logger` — the sanctioned channel, and the
+// only place a maintainer would look.
+test('apply reports a misspelled config field instead of ignoring it silently', () => {
+  const ctx = fakeCtx({ items: [] })
+  const warnings = []
+  ctx.logger = { warn: (message) => warnings.push(message) }
+  ctx.tools = { register: () => () => {} }
+  ctx.inject = (_deps, callback) => callback({ commands: { register: () => () => {} } })
+
+  // Defaults plus a typo: the shared store's thresholds are unchanged, so this
+  // cannot leak into another test.
+  pluginEntry.apply(ctx, { ...STORE_DEFAULTS, ...CORE_DEFAULTS, hoplimt: 5 })
+  assert.equal(warnings.length, 1)
+  assert.match(warnings[0], /hoplimt/)
+  assert.match(warnings[0], /unknown config field/)
+
+  // A clean config says nothing.
+  pluginEntry.apply(ctx, { ...STORE_DEFAULTS, ...CORE_DEFAULTS })
+  assert.equal(warnings.length, 1, 'no warning for a config that names real fields')
+})
+
+// ------------------------------------------------------------- packaging
+
+// Two install routes activate the SAME row id, and nothing downstream rejects
+// that: route A (`dsh.bundle` + the profile's bundle list) and route B (a
+// hand-written insert row in the profile's user patch layer). The composer
+// accepts both rows silently, and the second apply then dies registering
+// `peer_send` a second time — taking `/peers`, `/peer` and all four peer tools
+// with it. A package can only vouch for its OWN patch file, so this pins that
+// one: exactly one insert, carrying exactly this package's id.
+//
+// The profile's copy of that layer is out of reach from here, which is why the
+// plugin ALSO guards at apply time rather than trusting this test alone.
+test('the shipped patch layer declares this package exactly once', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  assert.equal(typeof manifest.dsh?.bundle?.patch, 'string', 'package.json must declare dsh.bundle.patch')
+
+  const patchPath = new URL(`../${manifest.dsh.bundle.patch.replace(/^\.\//, '')}`, import.meta.url)
+  const patch = readFileSync(patchPath, 'utf8')
+
+  // A second `- insert:` block would be a second activation of the same plugin.
+  assert.equal((patch.match(/^\s*-\s*insert:\s*$/gm) ?? []).length, 1, 'exactly one insert block')
+  const ids = [...patch.matchAll(/^\s*-\s*id:\s*(\S+)\s*$/gm)].map((match) => match[1])
+  assert.deepEqual(ids, [manifest.name], 'the row id must be this package, exactly once')
+})
+
+// What the plugin manager shows in its card. Not cosmetic bookkeeping: the Host
+// reads the title from `<pkg>/locale/<lang>.json` (NOT from `package.json.meta`,
+// which it never looks at) and the icon from the manifest's `icon`. Miss the
+// locale export and the card silently falls back to the raw package name — no
+// error, just `dsh-peer-sessions`.
+//
+// These assertions mirror the Host's own validation rules for those resources
+// (dsh-app-boot `readPluginMeta` / `iconOf`), because the real reader needs the
+// package to be resolvable BY NAME from a profile — which is true where it runs,
+// not in this checkout.
+test('the Host-readable display metadata is present and well formed', () => {
+  const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+
+  // The locale subpath MUST be exported: the Host resolves the dictionary by
+  // module specifier, so an unexported file reads as missing and falls back.
+  assert.equal(manifest.exports?.['./locale/*.json'], './locale/*.json', 'locale files must be exported')
+
+  // `locale/en.json` drives the whole scan (the Host stats it first), and every
+  // language id in the Host's pattern is a filename.
+  const languageId = /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/u
+  for (const language of ['en', 'zh']) {
+    assert.match(language, languageId)
+    const raw = readFileSync(new URL(`../locale/${language}.json`, import.meta.url), 'utf8')
+    const dictionary = JSON.parse(raw)
+    assert.equal(typeof dictionary.meta?.title, 'string', `${language}: meta.title must be a string`)
+    assert.ok(dictionary.meta.title.trim() !== '', `${language}: meta.title must not be empty`)
+    assert.equal(typeof dictionary.meta?.description, 'string', `${language}: meta.description must be a string`)
+  }
+  assert.match(readFileSync(new URL('../locale/en.json', import.meta.url), 'utf8'), /"title"/)
+
+  // The icon: relative, an allowed media type, a regular file inside the
+  // manifest directory, at most 256 KiB — exactly what `iconOf` enforces.
+  const icon = manifest.icon
+  assert.equal(typeof icon, 'string')
+  assert.doesNotMatch(icon, /^[A-Za-z][A-Za-z\d+.-]*:/u, 'the icon must be a relative path, not a URL or absolute path')
+  assert.ok(['.svg', '.png', '.jpg', '.jpeg', '.webp'].includes(icon.slice(icon.lastIndexOf('.'))), 'allowed icon type')
+  const iconUrl = new URL(`../${icon.replace(/^\.\//, '')}`, import.meta.url)
+  assert.ok(statSync(iconUrl).isFile(), 'the icon must exist as a regular file')
+  assert.ok(statSync(iconUrl).size <= 256 * 1024, 'the icon must be at most 256 KiB')
+  assert.ok(!icon.includes('..'), 'the icon must live inside the manifest directory')
+
+  // And both resources have to ship, or an installed copy cannot read them.
+  for (const entry of ['locale/*.json', 'icon.svg']) {
+    assert.ok(manifest.files.includes(entry), `files must ship ${entry}`)
+  }
 })
 
 // ------------------------------------------------- loop protection (delivery)
@@ -1611,7 +1940,7 @@ function wirePlugin(options = {}) {
 }
 
 test('the plugin entry declares its services and wires both halves in apply()', async () => {
-  const plugin = (await import('../lib/index.js')).default
+  const plugin = await import('../lib/index.js')
   assert.equal(typeof plugin.apply, 'function')
   for (const service of ['agents', 'sessionController', 'workspaceRegistry', 'userQuestions', 'tools']) {
     assert.ok(plugin.inject.includes(service), `expected ${service} to be injected`)
@@ -1687,6 +2016,16 @@ test('every message peer_send writes passes the harness format-v4 admission', as
       assert.doesNotThrow(() => assertV4RowAdmission(row, undefined), `${what} must be admissible as ${row.type}`)
     }
   }
+})
+
+// The tool's copy is what the model acts on: "the user declined" makes it stop,
+// while an unavailable surface is worth one retry.
+test('peer_send tells the model an unusable card is not a refusal', async () => {
+  const { call } = wirePlugin({ grant: null })
+  const output = await call('peer_send', { peer: 'Peer', kind: 'notice', summary: 'hi' })
+  assert.match(output, /could not be shown/)
+  assert.match(output, /not a refusal/)
+  assert.doesNotMatch(output, /The user declined/)
 })
 
 // ------------------------------------------------------------------- M2: inbox
