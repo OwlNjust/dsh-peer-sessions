@@ -81,6 +81,8 @@ npm test         # 全部条目（写本文时为 82），不需要启动 harnes
 
 `store` 因此放在**模块作用域**（见 `lib/index.js` 的注释）。若 store 建在 `apply()` 里，一次 re-apply 就会静默清空所有已开通道——真机上观测到过。
 
+> **2026-10-17 更正（dsh 0.2.1-rc.2 起）**：上面「不重新求值模块」这条**只在 0.2.0-rc.2 成立**。0.2.1 的 `dsh-hmr` 会在重组前把已加载模块与磁盘比对，把变过的模块 **evict 掉再 import**——于是改过的文件会在**下一次 profile 重组**时生效，同时把模块级 store 一起换掉（已开通道/授权清空）。所以「必须重启才生效」不再是唯一路径。完整证据与影响见 §十一之九。
+
 ### 2. 技能必须**复制**，不能软链
 
 技能提供者用 `lstat` 语义列举技能根（`dsh-fs-local`），**软链目录会被判成 `other` 而不是目录**，技能永远不会被发现。`install.sh` 用的是 `cp -R`。
@@ -875,6 +877,110 @@ peer_progress(peer: 'zzz-无此会话')
 
 - 第三方插件的工具**永远走不了 timed 卡片路径**（`isTimedAskUserQuestionSchema` 要求 `tool.name === 'ask_user_question'`），所以 blocking `ask()` 是唯一的路，而它的可靠性事实上依赖 `wait.callId`——这是一个**未文档化的依赖**，值得反馈 upstream。
 - `dsh-api-remotes` 在转发 scoped waterfall 时若 `request.agent !== carrierKeyOf(this)` 会抛**裸 `TypeError`**（同样无 code）。它也可能被报成"卡片弹不出来"；本次修法让这类错误现在会以 `TypeError: forwarded scoped event …` 的形式出现在 reason 里，可据此区分。
+
+## 十一之九、0.2.1-rc.2 复核：契约没变，但**模块生命周期**和**兼容性判定**变了
+
+复核日期 2026-10-17，宿主 `0.2.1-rc.2`（对比基准 `0.2.0-rc.2`，上一轮复核见 §十一之五）。
+
+### 结论先说
+
+- **没有功能性回归。** 本包在 0.2.1-rc.2 上照常加载并工作：`peer_list` 真机列出本工作区 6 个可寻址会话（自己排除、冷会话标 not running）、`peer_progress` 读出对端投影、`peer_inbox` 返回空收件箱；`npm test` 104 项全绿。
+- 插件层 Config 被宿主识别：Inspect 的 Config 目录里是 `id: include:dsh-peer-sessions`、`patchId: dsh-peer-sessions`、`status: schema`。
+- **导出符号集合逐包比对完全一致**：`dsh-llm` 66、`dsh-tools` 23、`dsh-client-locale` 5、`dsh-session-title` 9、`dsh-session-format-v3-to-v4` 10（0.2.0-rc.2 → 0.2.1-rc.2 无增无减）。
+- 本包真正依赖的函数体**逐字未变**：`createUserMessage`、`boundContextSummary`、`defineTool`、`assertV4RowAdmission`。
+- 有两件**新事**值得改代码/改文档：HMR 现在会驱逐过期模块（模块级 store 的红利到期）；宿主新增了实验性的**插件记录** API（能把授权写进会话日志）。另有一条规则变化已落实到 `package.json`：`engines.dsh`。
+
+### 复核方法（这次换了工具，值得复用）
+
+| 手段 | 能回答什么 | 局限 |
+|---|---|---|
+| **Inspect Provider**（`cordis_inspect_query`，宿主侧 Service / Event / Config） | **活宿主**上的服务方法签名、事件名、插件行的 Config 状态 | 只看签名，不看行为 |
+| 双版本 tarball diff（`npm pack pkg@0.2.0-rc.2` 与 `@0.2.1-rc.2` 各解一份，比 `lib/index.js` 的 `export {…}` 集合与目标函数体） | 符号/类型/实现是否变 | 不覆盖客户端那一半 |
+| 本包 `npm test` | 插件代码与**宿主同一份模块实例**是否还接得上（`node_modules` 软链，见坑 3） | 夹具仍是假的宿主 |
+| 真机调用 | 端到端 | 卡片、命令这类只有人会看见的路径仍需人点 |
+
+Inspect 是本轮最省 token 的一步：`listService` 一次就能确认 `agents.get/roots`、`sessions.get`、`sessionController.list/resolveAgent`、`workspaceRegistry.archivedSessionIds`、`userQuestions.ask`、`commands.register`、`tools.register` 全在，且签名与插件调用处一致；`listConfigs` 连"本行有没有被加载"都答了。
+
+### 逐项核对
+
+| 契约 | 0.2.1-rc.2 的事实 | 判定 |
+|---|---|---|
+| `dsh-llm` / `dsh-tools` / `dsh-client-locale` / `dsh-session-title` / `dsh-session-format-v3-to-v4` 导出集合 | 五个包**完全一致** | 无 |
+| `createUserMessage` / `boundContextSummary` / `defineTool` / `assertV4RowAdmission` | 函数体逐字相同 | 无 |
+| 会话格式版本 | 仍是 `SESSION_FORMAT_VERSION = 4`（0.2.0/0.2.1 都是 4） | 无 |
+| `SessionSummary` | 只**新增** `formatStatus?: 'current' \| 'migration-required'`；插件读的 `sessionId/updatedAt/running/blank/origin/cwd/projections` 全在 | 无（见"未采纳"） |
+| `SessionProjectionHints` | 形状不变（`kind/asOfSeq/values`），`peer_progress` 读的投影键名照旧 | 无 |
+| `sessionController.list/resolveAgent` | 签名与返回形状不变（`{items}` / `{agent}\|{error}`） | 无 |
+| `agents.get/roots`、`workspaceRegistry.archivedSessionIds`、`userQuestions.ask`、`commands`、`tools` | 逐个在活宿主上找到；`roots()` 仍是 `owner === undefined` | 无 |
+| `settings/document-updated` | `dsh-settings` 仍在两处 `emit`；`dsh-client-locale` 的命名空间常量仍在 | 无 |
+| `dsh.bundle` 解析 + 显示元数据 | 实跑 `bundlePatchPaths` → `[…/cordis.patch.yml]`；`readPluginMeta('dsh-peer-sessions', <profile>)` → 中英标题/描述 + icon data URI | 无 |
+| 版本兼容校验 | 见下面"变化 3"，本轮**改了** `package.json` | 已处理 |
+
+### 变化 1：HMR 现在会**驱逐过期模块** —— 模块级 store 的红利到期了
+
+**事实**（可复现）：`dsh-hmr` 的 `lib/index.js` 里 `evict(` 的出现次数 **0.2.0-rc.2 是 0，0.2.1-rc.2 是 5**。`reconcileProfile()` 在重组前把已加载模块与磁盘比对（`this.files.compare(...)`），把 stale 的模块 evict 掉再 `loader.import(...)`；被移出 profile 的包同样会被驱逐（`evictDropped`）。默认配置是 `root: []`（"Profile configuration reloads by default; module roots are opt-in"），所以**文件监听**是选开的，但**比对与驱逐发生在每次 profile 重组里**——插件页开/关任意插件、保存 patch 层都会触发重组。
+
+**影响**：`lib/index.js` 顶部那段注释的原话是"loader 只是重新 import 同一个**被缓存**的模块"，那是 0.2.0-rc.2 的事实；0.2.1 下换成：
+
+- 改过 `lib/*.js` 之后，**下一次 profile 重组**会（a）让新代码生效，（b）把这个模块换成新实例 → `sharedStore` 重建 → **已开通道、档位、额度、待答请求全部清空**。
+- 停用再启用插件同理（包被 drop 再 add）。
+- 对"正在进行的一次交换"来说，这与重启等价（都是全没），所以**不是新危险**；但它推翻了坑 1 的前提，也让"必须重启才生效"变成"下次重组就生效、顺手清空通道"。
+
+**处理**：注释已按事实更正；真想跨重载保留授权，走下面的"变化 2"，**不要**把 store 挪到别处（挪到哪都挡不住模块重新求值）。
+
+### 变化 2：会话**插件记录** API（`appendPluginRecord` / `pluginRecordOf`）——把授权写进会话日志
+
+**事实**：这两个符号 0.2.0-rc.2 里不存在（0 次），0.2.1-rc.2 里导出。语义（读自 `dsh-session` 源码）：
+
+- 向**当前会话日志**追加一条 `ignorable: true` 事件，类型必须是 `plugin:<小写段>/<…>` 语法；
+- 不进入 model-visible surface；**fork 与 resume 会带上**；格式迁移按 best-effort 保留；
+- 读回来用 `pluginRecordOf(event)`，**`data` 由属主自己校验**（记录可能来自旧版本属主，或由 v3 迁移改名而来）；
+- `appendPluginRecord(session, type, data)` → 返回 seq；`data` 必须可无损 JSON 序列化；detached 与 live 会话都能用（`#appendRecord` 只要求"下一个 seq"）。
+
+**拿到自己的 Session 不需要新服务**：`ctx.sessions.get(agent.id)`（`agent.id` 就是 `sessionId`，本包本来就拿它当 `selfId`）；`Session.log` 是公开字段，折记录不需要投影。
+
+**为什么没做**：这不是 bug 修复，是**设计决定**。把授权写进日志 = 授权跨重启、跨 fork 存活，H3（授权由人给）不冲突，但需要人明确同意"这条通道会一直开着直到撤销"；同时多出一条新信任边界（记录是插件自己写的，读回必须校验，且旧版本属主写的东西要能容忍）。建议作为 v1.3.0：`plugin:dsh-peer-sessions/grant` / `revoke` 两类记录 + 启动/首次调用时折叠 + `docs/design.md` 的 H3 一节同步更新。
+
+### 变化 3：`engines.dsh` 优先于 `peerDependencies`，本包已补上
+
+0.2.1 的 `unmetRequirements()` 先看 `engines.dsh`：**声明了就由它一家判断**（`peerDependencies` 被忽略），没声明才走旧规则。本包过去两头都没声明，所以兼容性校验**永远通过**——在 0.1.x 上也是。这不是错，但等于放弃了一道闸，而 0.2.1 的发布说明明确要求"插件作者需检查声明是否覆盖支持的 DSH 版本"。
+
+已加：
+
+```json
+"engines": { "node": ">=20", "dsh": ">=0.2.0-0" }
+```
+
+- **为什么带 `-0`**：`>=0.2.0` **不匹配** `0.2.0-rc.2`（预发布版小于同号正式版）。用宿主自己的 semver 实跑：`satisfies('0.2.0-rc.2', '>=0.2.0', {includePrerelease:true})` → `false`；`>=0.2.0-0` → `true`。而本包正是在 `0.2.0-rc.2` 上验过的。
+- **为什么不上界**：这是给人用的插件。上界会让未来的 0.3 在启动期因"不满足 engines"被**静默跳过**（`composeEntries` 把这类包塞进 `skippedBundles`，只留一条警告），对用户来说等于插件消失；下界只会挡住本包从未验过的 0.1.x。代价是 0.3 的破坏性变更要靠人复核——所以下面留了清单。
+- 实测（宿主自带 `evaluatePluginCompatibility`）：`0.2.0-rc.2` / `0.2.1-rc.2` → `undefined`（通过）；`0.1.7-rc.2` → `{"engines.dsh":">=0.2.0-0"}`（按预期不通过）。测试里已把这两头钉住。
+
+### 新增但本包**不采纳**的东西（附理由，免得下一个人重走一遍）
+
+- `SessionSummary.formatStatus`：只有 `fork` 在迁移未完成时抛 `session/migration-required`；`resolveAgent`/resume 会顺手迁移。所以本包"唤醒失败 → 目标未运行"的措辞暂时不会误导到无法收拾，**不值得**为它加一类拒绝。
+- `ctx.sessionProjections.register()`：本包可以做"让对端在 `peer_progress` 里看到我的通道状态"的投影，但那是把私有状态广播进列表投影，**隐私面变大**；`peer_progress` 现在已列出 19 个不认识的投影键（`plan`/`userQuestions`/`contextTimeline`…），再多个自己的键只是噪音。等有人真的需要再说。
+- `sessions.registerMessageProjection()`：把插件自有事件投影成消息。对本包没用——消息必须走 `createUserMessage` 并过 v4 准入（H2）。
+- 用户消息扩展位（`conversation.chat.user.content`、`conversation.user.text` / `.node`）：props 是 `{content, facts, interactive, loadImage}`，**没有 `source`**。想给 peer 消息加徽标，只能靠正文首行的 header 做文本启发式，等于把结构信息降级成字符串匹配——不做（这正是 §十一之八"显示即契约"的反面教材）。
+- Agent Team 的 `agentTeams.sendMessage`（直投目标 inbox）：它是**父子**授权（Lead/teammate），与本包"平级、无父子"的前提相反。它的存在说明宿主认可"直投 inbox"，但本包的 `followup`（下一个独立回合、不打断）仍是对平级会话唯一正确的入口。
+
+### 仍未验（要真机点一次）
+
+- **授权卡片**：`dsh-user-questions` 的导出与类型逐字未变，但"卡片能不能弹"只有真机能证明（§十一之八 的教训）。验证法：开一个新会话，让它对**冷**对端发一次 `peer_send`——弹卡即通，取消则无投递。
+- **`/peers`、`/peer connect|revoke|progress`**：注册路径（`ctx.inject(['commands'])` + `settings/document-updated` 重注册）由测试里真 Loader 跑过，但真机 `/` 菜单没点过。
+
+### 下次升级的复核清单（照抄）
+
+1. `npm test`（104 项）；先确认 `readlink -f node_modules` 指向**宿主当前那份**（坑 3）。
+2. 双版本 tarball diff：五个包的 `export {…}` 集合，加四个函数体（`createUserMessage`/`boundContextSummary`/`defineTool`/`assertV4RowAdmission`）。
+3. Inspect 活宿主：七个服务的签名、`settings/document-updated`、本包那一行的 Config 状态。
+4. 发布说明里搜四个词：`invariant`、`engines`、`Session`、`HMR`。
+5. 真机：`peer_list` / `peer_progress` / `peer_inbox`，外加**一张授权卡**。
+
+### 教训（比这次结论更通用）
+
+- **"导出符号一致"不等于"契约一致"。** 这次真正变的东西一个都不在符号表里：模块生命周期（HMR 驱逐）和兼容性判定规则（`engines.dsh`）。升级复核要按"插件依赖的每个**事实**"列，不是按"它 import 了什么"列。
+- **模块级状态的红利有版本前提。** 注释里写"loader 只会 re-apply 缓存模块"时，必须写出**这句话在哪个版本成立**——否则下次升级它就变成一句谎言，而代码里没有任何东西会报警。
+- **声明 requirements 是取舍，不是正确性。** 不给上界 → 永不因新版本被跳过，但破坏性变更要自己复核；给上界 → 新版本显式停用，代价是用户升级后插件消失。本包选了前者，并把取舍写在这里，而不是留在某次对话里。
 
 ## 十二、进一步阅读
 

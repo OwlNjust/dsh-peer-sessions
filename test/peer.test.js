@@ -1687,6 +1687,43 @@ test('the Host-readable display metadata is present and well formed', () => {
   }
 })
 
+// The Host's compatibility gate changed shape in dsh 0.2.1: an own `engines.dsh`
+// decides ALONE (peerDependencies are then ignored), and a bundle that fails it
+// is SKIPPED at startup with only a warning — the plugin silently disappears
+// from every conversation. The floor therefore has to include the PRERELEASE the
+// plugin was verified on: plain `>=0.2.0` does not match `0.2.0-rc.2`, which is
+// exactly the dsh version this package was last measured against.
+//
+// The Host's own evaluator is the oracle here, not a restatement of its semver
+// rules — the same discipline as the `assertV4RowAdmission` test above.
+test('engines.dsh declares the verified floor, and the Host agrees', async () => {
+  const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  assert.equal(typeof manifest.engines?.dsh, 'string', 'package.json must declare engines.dsh')
+
+  const { evaluatePluginCompatibility } = await import('@deepseek-ai/dsh-app-boot')
+
+  for (const runtime of ['0.2.0-rc.2', '0.2.1-rc.2', '0.2.0']) {
+    assert.equal(
+      evaluatePluginCompatibility(manifest, {}, runtime),
+      undefined,
+      `dsh ${runtime} is inside the verified range and must not be refused`,
+    )
+  }
+
+  const below = evaluatePluginCompatibility(manifest, {}, '0.1.7-rc.2')
+  assert.deepEqual(
+    below?.requirements,
+    { 'engines.dsh': manifest.engines.dsh },
+    '0.1.7 is below the verified floor: the gate must name engines.dsh',
+  )
+
+  // No upper bound is a DECISION, pinned here so nobody adds one by accident:
+  // a future minor that skips this bundle at startup would look to the user like
+  // the plugin vanished. Re-verification is the maintenance checklist's job
+  // (`MAINTENANCE.md` §十一之九), not the version range's.
+  assert.equal(evaluatePluginCompatibility(manifest, {}, '0.3.0'), undefined, 'no upper bound')
+})
+
 // ------------------------------------------------- loop protection (delivery)
 
 // HOPS COUNT RELAYS, NOT REPLIES. This test used to assert the opposite — that
