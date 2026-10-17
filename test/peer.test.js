@@ -82,16 +82,26 @@ function captureCommands(core) {
   return handlers
 }
 
-/** A fake agent that records what was delivered to it. */
-function fakeAgent(id, received, deliveredTo) {
+/**
+ * A fake agent that records what was delivered to it.
+ *
+ * `withInbox` models the Host's real `Agent.inbox`: `nextTurn` lists messages
+ * that are queued but NOT yet claimed, and `replace` swaps one in place (durably,
+ * in the real Host). Only the tests that exercise merge-while-busy ask for it;
+ * every other test keeps the old, claim-everything double, so their delivery
+ * counts stay meaningful.
+ */
+function fakeAgent(id, received, deliveredTo, withInbox = false) {
+  const pending = []
   const note = (via) => (message) => {
     received.push({ via, message, to: id })
+    if (via === 'followup' && withInbox) pending.push(message)
     if (deliveredTo === undefined) return
     const list = deliveredTo.get(id) ?? []
     list.push({ via, message })
     deliveredTo.set(id, list)
   }
-  return {
+  const agent = {
     id,
     status: 'idle',
     followup: note('followup'),
@@ -100,6 +110,35 @@ function fakeAgent(id, received, deliveredTo) {
     },
     inject: note('inject'),
   }
+  if (withInbox) {
+    agent.inbox = {
+      get nextTurn() {
+        return pending
+      },
+      get hasPending() {
+        return pending.length > 0
+      },
+      replace(messageId, newMessage) {
+        const index = pending.findIndex((message) => message.id === messageId)
+        if (index === -1) return false
+        pending[index] = newMessage
+        return true
+      },
+      remove(messageId) {
+        const index = pending.findIndex((message) => message.id === messageId)
+        if (index === -1) return false
+        pending.splice(index, 1)
+        return true
+      },
+      /** Test-only: model the peer claiming (reading) whatever is queued. */
+      claimAll() {
+        const claimed = [...pending]
+        pending.length = 0
+        return claimed
+      },
+    }
+  }
+  return agent
 }
 
 /**
@@ -130,6 +169,8 @@ function fakeCtx({
   // Cold conversations by id, as `sessionController.inspect()` would return them:
   // `{ events }`. Present only when a test wants the cross-log revocation check.
   inspections = new Map(),
+  // Give the fake agents a real-ish `inbox` so merge-while-busy can be exercised.
+  merge = false,
 }) {
   const received = []
   const warnings = []
@@ -142,7 +183,7 @@ function fakeCtx({
    * per-recipient, so a flat list cannot answer that.
    */
   const deliveredTo = new Map()
-  const agents = new Map(agentIds.map((id) => [id, fakeAgent(id, received, deliveredTo)]))
+  const agents = new Map(agentIds.map((id) => [id, fakeAgent(id, received, deliveredTo, merge)]))
   const asked = []
   const listeners = new Map()
   return {
@@ -152,6 +193,8 @@ function fakeCtx({
     warnings,
     /** Make a live agent cold again, the way an idle conversation becomes cold. */
     drop: (id) => agents.delete(id),
+    /** Model the peer reading (claiming) whatever is queued in its inbox. */
+    claimPending: (id) => agents.get(id)?.inbox?.claimAll?.() ?? [],
     agents: {
       get: (id) => agents.get(id),
       roots: () => [...agents.values()],
@@ -187,7 +230,7 @@ function fakeCtx({
         // absent from the live registry until resolved, which is exactly the
         // case that decides `willWake`.
         if (!revive) return { error: { code: 'session/not-found' } }
-        const created = fakeAgent(id, received, deliveredTo)
+        const created = fakeAgent(id, received, deliveredTo, merge)
         agents.set(id, created)
         return { agent: created }
       },
@@ -1875,6 +1918,130 @@ test('a channel the PEER granted can be revoked from a log that never held it', 
   assert.match(await second.call('peer_list', {}), /No peer channels open/)
 })
 
+// ---------------------------------------- merge while the peer is busy (D)
+
+// The defect this closes: `inbox.claim()` takes exactly ONE next-turn message
+// per turn, so a burst of progress reports becomes N turns. The first turn
+// verifies a state that later reports have already replaced, and only finds out
+// after paying for the work. While the queued message is still unclaimed, a
+// newer message is folded into it — nothing is dropped, and the peer reads the
+// whole burst once, in send order, with every message's own time attached.
+
+/** The text of whatever is queued but unclaimed for one peer. */
+function queuedText(ctx, id) {
+  const pending = ctx.agents.get(id)?.inbox?.nextTurn ?? []
+  return pending
+    .map((message) => message.content.filter((block) => block.type === 'text').map((block) => block.text).join(''))
+    .join('\n')
+}
+
+test('a burst reaches a busy peer as ONE ordered batch, every message kept', async () => {
+  const { call, ctx, store } = wirePlugin({ grant: 1, merge: true })
+  await call('peer_send', { peer: PEER, kind: 'notice', summary: 'work started' })
+  await call('peer_send', { peer: PEER, kind: 'notice', summary: 'halfway there' })
+  await call('peer_send', { peer: PEER, kind: 'notice', summary: 'done: see result.txt' })
+
+  const pending = ctx.agents.get(PEER).inbox.nextTurn
+  assert.equal(pending.length, 1, 'one queued message, not three turns')
+  const text = queuedText(ctx, PEER)
+  assert.match(text, /\[peer-session batch · 3 messages/)
+  assert.equal((text.match(/^=== message \d+ · notice · sent /gm) ?? []).length, 3, 'each segment is labeled and timed')
+
+  const positions = ['work started', 'halfway there', 'done: see result.txt'].map((summary) => text.indexOf(summary))
+  assert.ok(positions.every((position) => position !== -1), 'no message was dropped')
+  assert.deepEqual([...positions].sort((a, b) => a - b), positions, 'send order preserved')
+  assert.equal(
+    (text.match(/\[peer-session message · from another conversation/g) ?? []).length,
+    3,
+    'every segment keeps its own provenance header',
+  )
+  // The sender-side inbox is still one entry per message, each retrievable by id.
+  assert.equal(store.inboxFor(PEER).length, 3)
+
+  // And the merged row is still admissible to the Host's format v4 writer.
+  const { assertV4RowAdmission } = await import('@deepseek-ai/dsh-session-format-v3-to-v4')
+  assert.doesNotThrow(() => assertV4RowAdmission({ seq: 1, type: 'user/message', data: pending[0] }, undefined))
+})
+
+test('every message carries its own send time', async () => {
+  const { call, ctx } = wirePlugin({ grant: 1, merge: true })
+  await call('peer_send', { peer: PEER, kind: 'notice', summary: 'a' })
+  // A single queued message keeps the plain header form, and it already names
+  // its send time in the same offset form the Host prints the turn clock in.
+  assert.match(queuedText(ctx, PEER), /^sent: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/m)
+  // Merged segments carry it in their label as well.
+  await call('peer_send', { peer: PEER, kind: 'notice', summary: 'a2' })
+  assert.match(queuedText(ctx, PEER), /^=== message \d+ · notice · sent \d{4}-\d{2}-\d{2}T/m)
+
+  // And a plain (unmerged) delivery carries `sent:` in its own header block.
+  const plain = wirePlugin({ grant: 1 })
+  await plain.call('peer_send', { peer: PEER, kind: 'notice', summary: 'b' })
+  const body = plain.ctx.received.at(-1).message.content[0].text
+  assert.match(body, /^sent: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/m)
+})
+
+test('once the peer has claimed it, the next message is its own turn', async () => {
+  const { call, ctx } = wirePlugin({ grant: 1, merge: true })
+  await call('peer_send', { peer: PEER, kind: 'notice', summary: 'first' })
+  assert.equal(ctx.claimPending(PEER).length, 1, 'the peer read it')
+
+  await call('peer_send', { peer: PEER, kind: 'notice', summary: 'second' })
+  assert.equal(ctx.agents.get(PEER).inbox.nextTurn.length, 1)
+  assert.doesNotMatch(queuedText(ctx, PEER), /peer-session batch/, 'a claimed message cannot be merged into')
+})
+
+test('a replace that loses the race falls back to a queued turn, losing nothing', async () => {
+  const { call, ctx } = wirePlugin({ grant: 1, merge: true })
+  await call('peer_send', { peer: PEER, kind: 'notice', summary: 'first' })
+  // The peer claims between our look at `nextTurn` and the swap.
+  ctx.agents.get(PEER).inbox.replace = () => false
+  await call('peer_send', { peer: PEER, kind: 'notice', summary: 'second' })
+
+  assert.equal(ctx.agents.get(PEER).inbox.nextTurn.length, 2, 'the fallback queues a separate message')
+  assert.match(queuedText(ctx, PEER), /first/)
+  assert.match(queuedText(ctx, PEER), /second/)
+})
+
+test('past the merge cap the overflow is its own message, still in order', async () => {
+  const { call, ctx } = wirePlugin({ grant: 1, merge: true, coreOptions: { mergeMaxChars: 600 } })
+  for (const label of ['a'.repeat(40), 'b'.repeat(40), 'c'.repeat(40)]) {
+    await call('peer_send', { peer: PEER, kind: 'notice', summary: label })
+  }
+  const pending = ctx.agents.get(PEER).inbox.nextTurn
+  assert.ok(pending.length >= 2, 'the cap stops one unbounded message')
+  const all = queuedText(ctx, PEER)
+  assert.ok(all.includes('a'.repeat(20)) && all.includes('b'.repeat(20)) && all.includes('c'.repeat(20)))
+})
+
+test('merging can be turned off, and then delivery is one turn per message', async () => {
+  const { call, ctx } = wirePlugin({ grant: 1, merge: true, coreOptions: { mergeWhileBusy: false } })
+  await call('peer_send', { peer: PEER, kind: 'notice', summary: 'one' })
+  await call('peer_send', { peer: PEER, kind: 'notice', summary: 'two' })
+  assert.equal(ctx.agents.get(PEER).inbox.nextTurn.length, 2)
+})
+
+test('a queued message written before this feature is wrapped as segment 1', async () => {
+  const { call, ctx } = wirePlugin({ grant: 1, merge: true })
+  await call('peer_send', { peer: PEER, kind: 'notice', summary: 'old one' })
+  const pending = ctx.agents.get(PEER).inbox.nextTurn
+  // Strip the `sent:` line to model a message queued by the previous build.
+  pending[0] = { ...pending[0], content: [{ type: 'text', text: pending[0].content[0].text.replace(/^sent: .*\n/m, '') }] }
+
+  await call('peer_send', { peer: PEER, kind: 'notice', summary: 'new one' })
+  const text = queuedText(ctx, PEER)
+  assert.match(text, /\[peer-session batch · 2 messages/)
+  assert.match(text, /=== message 1 · notice · sent (unknown|\d)/)
+  assert.ok(text.indexOf('old one') < text.indexOf('new one'))
+})
+
+test('silent context is never folded into a queued turn', async () => {
+  const { call, ctx } = wirePlugin({ grant: 1, merge: true })
+  await call('peer_send', { peer: PEER, kind: 'notice', summary: 'queued notice' })
+  await call('peer_send', { peer: PEER, kind: 'notice', summary: 'quiet context', silent: true })
+  assert.equal(ctx.agents.get(PEER).inbox.nextTurn.length, 1)
+  assert.doesNotMatch(queuedText(ctx, PEER), /quiet context/)
+})
+
 // ------------------------------------------------------------- packaging
 
 // Two install routes activate the SAME row id, and nothing downstream rejects
@@ -2268,7 +2435,7 @@ test('the hop refusal arrives before the consent card', async () => {
  * @returns the context, the tools, a `call`, and the self agent.
  */
 function wirePlugin(options = {}) {
-  const { sharedStore = false, apply = false, ...ctxOptions } = options
+  const { sharedStore = false, apply = false, coreOptions = {}, ...ctxOptions } = options
   const ctx = fakeCtx({
     items: [summary(SELF), summary(PEER)],
     agentIds: [SELF, PEER],
@@ -2283,7 +2450,7 @@ function wirePlugin(options = {}) {
     ctx.inject = (_deps, callback) => callback({ commands: { register: () => () => {} } })
     pluginEntry.apply(ctx)
   } else {
-    core = new PeerCore(ctx, store, translator(DEFAULT_LOCALE))
+    core = new PeerCore(ctx, store, translator(DEFAULT_LOCALE), coreOptions)
     registerTools(ctx, core)
   }
   const tools = new Map(registered.map((definition) => [definition.name, definition]))

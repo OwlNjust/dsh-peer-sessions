@@ -125,6 +125,25 @@ says whose it is. Each item offers edit / delete / **steer into the running turn
 `Cmd`/`Ctrl`+`Enter` interjects every queued message. That is the human's escape hatch when a
 long step is holding a reply.
 
+### A burst is merged, and every message carries its send time
+
+A long task can receive several messages from the same conversation. The Host claims
+exactly **one** queued message per turn, so three messages used to mean three turns: the
+first turn read a state that the later ones had already replaced, and only found out after
+doing the work. Two changes address that:
+
+- **Every peer message names its send time** (`sent: 2026-10-17T20:01:02+08:00`, local with
+  the offset, directly comparable with the time the runtime context prints each turn).
+- **While a queued message is still unread, a newer one is folded into it.** The peer's next
+  turn reads one ordered batch, with each message's time and an explicit note that later
+  entries may revise or supersede earlier ones.
+  - **Nothing is dropped.** If the queued message was claimed first, the new message becomes
+    its own turn exactly as before; past `mergeMaxChars` the overflow is delivered separately.
+  - `silent` deliveries are never merged — they are injected into the next step, where
+    replacing in-flight content would be a different thing.
+  - The inbox still holds **one entry per message**: merging happens on the delivery side
+    only, and `peer_inbox(id)` returns each message's own body.
+
 ## Configuration
 
 The thresholds are yours to tune, from the plugin's composition row:
@@ -158,6 +177,8 @@ The thresholds are yours to tune, from the plugin's composition row:
 | `maxCandidates` | `8` | Conversations listed before an ambiguous-title refusal summarises |
 | `recentTurns` | `3` | Trailing turns `peer_progress` summarises |
 | `previewMaxChars` | `200` | Cap on one preview line in `peer_progress` |
+| `mergeWhileBusy` | `true` | Fold a newer message into the peer's still-unread queued message |
+| `mergeMaxChars` | `12000` | Body cap for one merged message; past it, delivery splits |
 
 Two things worth knowing before you edit it:
 

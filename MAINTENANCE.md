@@ -987,7 +987,7 @@ Inspect 是本轮最省 token 的一步：`listService` 一次就能确认 `agen
 - **声明 requirements 是取舍，不是正确性。** 不给上界 → 永不因新版本被跳过，但破坏性变更要自己复核；给上界 → 新版本显式停用，代价是用户升级后插件消失。本包选了前者，并把取舍写在这里，而不是留在某次对话里。
 
 
-## 十一之十、v1.3.0：授权持久化（`lib/grants.js`）
+## 十一之十、v1.3.0：授权持久化（`lib/grants.js`）与忙时合并投递
 
 **做了什么**：授权不再随进程死亡。dsh 0.2.1 的 `appendPluginRecord` 提供了一种**词汇表之外**的可持久化事件（`ignorable: true`、类型 `plugin:<属主>/<名字>`、不进模型可见面、fork/resume 会带上、不认识它的读者跳过），于是"授权跨重启/跨重载存活"第一次可以在**不碰已发布事件词汇表**的前提下实现——这正是 §十一之九 提议、原先被否决的那件事，否决理由（词汇表风险）在这里不再成立。
 
@@ -1049,6 +1049,40 @@ Inspect 是本轮最省 token 的一步：`listService` 一次就能确认 `agen
    **修法**：给每个通道记 `stateAt`（它最后一条记录的写入时间），折叠时逐条比较——`existing.stateAt > operation.at` 就跳过这条操作（upsert 与 revoke 都适用）；`adopt(record)` 把 `stateAt` 设成记录时间，`changed()` 在每次非 revoke 变更时把它推到 `now`。于是**同一 pair 以最新一次写入为准，无论它在哪份日志里**。两条回归测试分别钉住"旧墓碑不能删新授权"与"新墓碑仍然赢"。
    **教训**：**把"每个会话的日志"当成"各自独立的真相"是错的前提**——一旦它们共享一个内存 store，就必须定义**跨日志的偏序**。这里可用的偏序只有记录时间，而它必须**在每一次写入时维护**，不能只在读的时候临时算。
 
+### D：忙时合并投递（v1.3.0，同一版本交付）
+
+**问题**：宿主 `inbox.claim()` **每个回合只取一条** `next-turn`（`claim()` 里 `mutate("next-turn", 0, 1, …)`），所以对端忙时积压的 N 条消息 = N 个回合。第一回合读"工作刚开始"，干完活才看到"已完成"——**为一个已经过时的状态付了整轮代价**。修正型与进展型都会这样。
+
+**做法（不加任何新的持久化格式）**：用宿主公开的 `agent.inbox`：
+
+```js
+inbox.nextTurn              // 还没被 claim 的排队消息（readonly UserMessage[]）
+inbox.replace(id, 新消息)   // 就地替换；走 splice，durably recorded；不在队列里返回 false
+```
+
+`deliver` 在 `followup` 之前先试 `core.mergeQueued()`：在 `nextTurn` 里找**同源**（`source.kind === 'peer-message' && source.senderSessionId === selfId`）、属于**同一会话**的未读 relay；有就把新正文拼成 `mergeIntoBatch()`，`replace` 进去；否则走原来的 `followup`。
+
+**四种会回退成独立回合的情况**（都**不丢消息**）：
+
+1. `replace` 返回 `false`——那条刚好被 claim 了（对端已经开始读）；
+2. 合并后正文超过 `mergeMaxChars`（默认 12000）——溢出部分单独成条；
+3. `mergeWhileBusy: false`——配置关闭；
+4. `silent` 投递——它走 `next-step` 注入，替换在途内容风险不同，**永不合并**。
+
+**批次正文**（`lib/messages.js`）：批次头说明"因为你在忙所以一起投递、按发送时间排序、后面可能推翻前面、每条也可用 `peer_inbox` 单独取回"；每段 `=== message N · kind · sent <本地 ISO> ===`，段内保留该条**自己的**完整来源抬头（H2 不破）。旧的单条格式（前一个版本排队的消息）会被**包成第 1 段**，不会出现"批次里嵌单条"的畸形。
+
+**每条消息的 `sent:`**：`renderPeerBody` 现在写 `sent: <本地时间带偏移>`（`localIso()`），与每轮 runtime context 的时间同格式，接收方不用心算。`peer_inbox` 按 id 取回时抬头也带 `Sent …`。
+
+**为什么不用另外三个方案**（都在讨论里否掉）：
+
+- `pre-step` 注入"你后面还有 N 条"：能提醒，但会多一条可见日志、且**不减少回合数**（B）；
+- 发送方 `supersedes` + 撤销排队：等于允许**丢消息**，与"一条都不能丢"冲突（C）；
+- 插件里暂存 + 定时 flush：要自己持久化待发队列、有崩溃丢消息窗口，而**宿主的排队消息本来就是持久的**，没必要（D 的第一版设想）。
+
+**测试（8 条新增，共 123）**：一批三段的顺序/标签/时间/来源抬头/不丢；单条与批次的 `sent` 两种形态；被 claim 后不合并；`replace` 竞争失败回退；超过上限拆分；配置关闭；旧格式包成第 1 段；`silent` 不合并。合并后的行还额外过了一次 `assertV4RowAdmission`。
+
+**实现时踩到的一条测试教训**：给夹具的 `fakeAgent` 加上真的 `inbox` 之后，**所有**既有多发测试都会开始合并、`received.length` 随之变化。所以 inbox 做成 **opt-in**（`wirePlugin({ merge: true })`），默认仍是"claim 掉一切"的旧替身。**给夹具增加一种真实能力，会改变所有既有测试的语义**——默认关闭、专项测试显式打开，才不会让一百多条测试在"看起来没坏"的情况下换了被测对象。
+
 ### 真机验收（需重启）
 
 1. `./install.sh`（或 `npm run link`，链路没变）→ **重启 web profile**，让 `lib/grants.js` 与新的 `core.js` 真正加载（坑 1，以及 §十一之九 的 HMR 说明）。
@@ -1057,6 +1091,7 @@ Inspect 是本轮最省 token 的一步：`listService` 一次就能确认 `agen
 4. `/peer revoke <对端>` → **再重启** → `/peers` 应显示 `No peer channels open`（中文：`当前没有平级通道`）。
 5. 会话日志里应能看到 `"type":"plugin:dsh-peer-sessions/channel"` 与 `plugin:dsh-peer-sessions/revoke` 两种行；`grep -c '"kind":"plugin"'` 仍应为 0（v4 仍拒收旧包装）。
 6. **对端先发话的边界**：只让对端发、批准方还没加载过时，对端应**重新弹一张卡**——这是设计，不是回退。
+7. **合并投递**：让对端跑一个长任务（几十秒以上），期间从本会话连发 3 条 `peer_send`。对端恢复后应**只开一个回合**，读到一条 `[peer-session batch · 3 messages …]`，三段按发送时间排序、各带 `sent:`，且没有任何一条丢失。若第三条到达时前一条已被读，则第三条单独成回合——同样正确。
 
 **2026-10-17 真机结果（0.2.1-rc.2，本机 web）**：① 授权跨重启 ✓（重启后 `peer_list` 在无任何人工操作的情况下列出通道，来源只能是日志折叠）；② 撤销持久 ✓（墓碑 seq 2252，命令当场断开 pc-1）；③ 授权卡片在 0.2.1 上工作 ✓（不带档位的 `/peer connect` 弹卡并建成 pc-2——这也是 §十一之九"未验"清单里那一条的答案）；④ 发送不再弹卡 ✓（`remaining 200→199`，跳过卡片路径）；⑤ 额度持久 ✓（seq 2333 记录 `remaining:199`，重启后可读回）；⑥ 投递审计仍过 v4 准入 ✓（seq 2339 `source.kind = plugin:dsh-peer-sessions` 的 `user/message` 落盘）；⑦ 折叠只读 ✓（hydrate 不写新记录）。**并且真机抓到了第 4 个坑**（见上），已修并补测试。
 
