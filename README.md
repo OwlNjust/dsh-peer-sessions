@@ -218,7 +218,7 @@ Two things worth knowing before you edit it:
 - Why this is possible now: dsh 0.2.1's `appendPluginRecord` writes an `ignorable` event
   OUTSIDE the vocabulary. The earlier rejection of a custom `type` was right — it would
   have made the session unopenable; plugin records pay no such price. See `docs/design.md`
-  §6 and `MAINTENANCE.md` §十一之九/§十一之十.
+  §6 and `MAINTENANCE.md` §二.
 - **Requires dsh >= 0.2.1**: older Hosts have no `appendPluginRecord`. The plugin still
   works there; grants merely fall back to their previous process lifetime and one warning
   is logged. An unsupported Host never fails to load because of this.
@@ -251,7 +251,7 @@ grep -c dsh-peer-sessions ~/.dsh/profiles/web/cordis.patch.yml   # → 0
 
 **Two routes exist; use one.** Both activate the same plugin id. Nothing rejects the
 duplication — the composer lists the row twice and the loader mounts that id **once, last
-one wins, with no warning** (measured on 0.2.0-rc.2; see `MAINTENANCE.md` §十一之四). So
+one wins, with no warning** (measured on 0.2.0-rc.2; see `MAINTENANCE.md` §一 安装). So
 the cost is not a crash but a **silently shadowed row**: whichever copy comes later decides
 the row's `config`, which is the kind of thing you discover after an afternoon of
 wondering why a setting did nothing.

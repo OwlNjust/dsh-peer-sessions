@@ -1605,7 +1605,7 @@ test('the Config schema defaults are exactly the module defaults', async () => {
 // A row that omits `config` must still activate. Cordis validates the row's
 // config against this schema, and a field with no default would fail that
 // validation — at which point the plugin is only a startup WARNING and is
-// silently missing (MAINTENANCE.md §十一之七). So: no field without a default.
+// silently missing (MAINTENANCE.md §三 坑 15). So: no field without a default.
 test('an omitted config still resolves to a complete set of limits', () => {
   const resolved = pluginEntry.Config['~standard'].validate(undefined)
   assert.equal(resolved.issues, undefined, 'omitting config must not fail validation')
@@ -2147,7 +2147,7 @@ test('engines.dsh declares the verified floor, and the Host agrees', async () =>
   // No upper bound is a DECISION, pinned here so nobody adds one by accident:
   // a future minor that skips this bundle at startup would look to the user like
   // the plugin vanished. Re-verification is the maintenance checklist's job
-  // (`MAINTENANCE.md` §十一之九), not the version range's.
+  // (`MAINTENANCE.md` §四 升级复核), not the version range's.
   assert.equal(evaluatePluginCompatibility(manifest, {}, '0.3.0'), undefined, 'no upper bound')
 })
 

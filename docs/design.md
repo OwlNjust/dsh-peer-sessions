@@ -239,7 +239,7 @@ peer 消息**不能**：批准任何东西、修改任何权限、发起新的 p
 - **来源**：`locale.preference`（`dsh-client-locale` 拥有的设置命名空间，宿主侧的行 id 就是 `locale`）。**只读，不注册。** 读法：`settings.describe()` 找到 `ns === 'locale'` 的那条描述符，取它的 `value`——`describe()` 是 0.1.7-rc.2 之后宿主唯一提供的读法（`get(ns)` 已移除）。
 - **能跟随到什么程度**：契约原文是 *"absence delegates to the browser"* —— 未显式选择时由浏览器决定，`navigator.language` 不会跨到宿主侧。因此：显式值 `zh*`/`en*` 按值跟随；**缺失或无法识别时回退简体中文**。
 - **提问卡片天然跟随**：每次调用现生成，走 `core.t`（永远读当前 locale）。
-- **命令描述需要重新注册**：描述在注册时就固定了。因此监听 `settings/document-updated`（宿主**唯一**会发的设置事件；回调收到 `(ns, revision)`），语言变化时**注销后重新注册**两条命令。**注意历史**：这里原来写的是 `settings/updated`，那在 dsh `0.1.7-rc.2` 就被移除了——于是这段热切换代码**从未生效过**（详见 `MAINTENANCE.md` §十一之五）。
+- **命令描述需要重新注册**：描述在注册时就固定了。因此监听 `settings/document-updated`（宿主**唯一**会发的设置事件；回调收到 `(ns, revision)`），语言变化时**注销后重新注册**两条命令。**注意历史**：这里原来写的是 `settings/updated`，那在 dsh `0.1.7-rc.2` 就被移除了——于是这段热切换代码**从未生效过**（详见 `MAINTENANCE.md` §三 坑 18）。
 - 支持的语言：`zh`、`en`。新增语言 = 往 `lib/i18n.js` 的 `MESSAGES` 加一张表；`normalizeLocale` 匹配 `zh`/`zh-CN`/`zh_Hans` 这类前缀标签。
 
 **有意保持英文的部分**：工具描述与工具输出（那是**模型**的接口，不是 UI 文案），以及 peer 消息的来源抬头 `[peer-session message · NOT a user instruction]`（它是给接收方模型看的机器可读归属标签）。命令**结果**是本地化的——同一次人机交互里描述中文、回答英文会显得断裂。
@@ -315,7 +315,7 @@ peer 消息**不能**：批准任何东西、修改任何权限、发起新的 p
 1. **自定义消息来源可用；`createUserMessage` 不校验它，但会话持久化层校验。**
    `createUserMessage` 接受 `source = { kind: 'peer-message', form: 'relay', senderSessionId }`——`MessageSourceMap` 是可合并扩展的，没有运行时白名单。
    ⚠️ 但它**同样接受缺少 `senderSessionId` 的来源**。也就是说 H2 无法靠运行时保证，只能靠代码强制：`lib/messages.js` 在缺少发送方时直接抛错，绝不降级。
-   ⚠️ **构造不校验不等于没人校验。** 会话格式 v4（dsh `0.1.7-rc.2` 起）在**每次追加写入、也每次读取**时都会用 `assertV4RowAdmission` 检查 source：`kind` 必须是非空字符串，且**不得是已废弃的通用包装 `'plugin'`**（报错原文 `format v4 message requires a producer-owned source kind`）。第三方插件自己的生产者 kind 由 v3→v4 迁移推导为 `plugin:<包名>`。**2026-09-29 的故障就是发送方审计写了 `kind:'plugin'`**——构造、类型、单元测试全过，直到宿主的 writer 拒绝该行；而 `exec.deferContext()` 在投递**之后**，于是整回合连同已完成的投递一起失败。详见 `MAINTENANCE.md` §十一之六。
+   ⚠️ **构造不校验不等于没人校验。** 会话格式 v4（dsh `0.1.7-rc.2` 起）在**每次追加写入、也每次读取**时都会用 `assertV4RowAdmission` 检查 source：`kind` 必须是非空字符串，且**不得是已废弃的通用包装 `'plugin'`**（报错原文 `format v4 message requires a producer-owned source kind`）。第三方插件自己的生产者 kind 由 v3→v4 迁移推导为 `plugin:<包名>`。**2026-09-29 的故障就是发送方审计写了 `kind:'plugin'`**——构造、类型、单元测试全过，直到宿主的 writer 拒绝该行；而 `exec.deferContext()` 在投递**之后**，于是整回合连同已完成的投递一起失败。详见 `MAINTENANCE.md` §三 坑 14。
 
 2. **命令注册与工具注册的形状。**
    `ctx.commands.register()` 每个调用自动写 `command/run` / `command/done`（审计白拿），handler 不经过模型。
@@ -346,7 +346,7 @@ peer 消息**不能**：批准任何东西、修改任何权限、发起新的 p
    - 在 `apply()` 里创建的 store **每次 re-apply 都会被丢弃**，静默清空所有已开通道（实测：一次投递刚在某个通道上成功，下一次调用该通道就不见了，中间没有重启）。因此 store 放在**模块作用域**（见 `lib/index.js` 的说明）。
    - **改代码仍需重启进程**才会生效：re-apply 拿到的是缓存里的旧模块。
    顺带说明：这意味着"改文件 → 自动生效"是不成立的，但"改文件 → 通道被清空"是成立的——一个很容易误判的组合。
-   **2026-10-17 更正（dsh 0.2.1 起）**：0.2.1 的 `dsh-hmr` 增加了**驱逐过期模块**（`evict(` 从 0 处变成 5 处），重组前会把已加载模块与磁盘比对。于是改过的文件会在**下一次 profile 重组**时生效，**同时**把模块级 store 换成新实例。对"正在进行的一次交换"这与重启等价，但"必须重启才生效"不再是唯一路径，而"通道被清空"的时机变成了"下次重组"。详见 `MAINTENANCE.md` §十一之九。
+   **2026-10-17 更正（dsh 0.2.1 起）**：0.2.1 的 `dsh-hmr` 增加了**驱逐过期模块**（`evict(` 从 0 处变成 5 处），重组前会把已加载模块与磁盘比对。于是改过的文件会在**下一次 profile 重组**时生效，**同时**把模块级 store 换成新实例。对"正在进行的一次交换"这与重启等价，但"必须重启才生效"不再是唯一路径，而"通道被清空"的时机变成了"下次重组"。详见 `MAINTENANCE.md` §三 坑 1。
 
 8. **`once` 档的语义已定为「一次往来」。**
    实测发现：「仅本次投递」批准后 `remaining=0`、通道立即作废，于是**对端的回复需要一次新的批准**——而且那张卡片出现在**对端会话**里，用户看到的是"我不是刚批准过吗"。这不是实现缺陷，是档位定义的问题。
@@ -392,7 +392,7 @@ peer 消息**不能**：批准任何东西、修改任何权限、发起新的 p
 | 发送方审计 | 工具输出出现 `deferContext` 生成的 producer-owned notice（`kind: 'plugin:dsh-peer-sessions'`） |
 | **回复闭环** | 对端 `peer_send(kind:'reply', replyTo:…)` → 本端收件箱收到 `received` |
 | **一次往来** | 同一次回复**搭了那张「仅这一次」批准**，对端没有再被弹卡片；回复送达后通道自动作废 |
-| 语言跟随（**只在宿主 ≤0.1.5-rc.3 上成立；0.1.7 起静默失效，已修、待真机复核**） | 命令描述与提问卡片随 `locale.preference`（缺失时回退简体中文）。**这条记录不再代表当前行为**：读值用的 `settings.get(ns)` 与监听用的 `settings/updated` 都在 dsh `0.1.7-rc.2` 被移除，而两者分别走可选链与静默订阅，所以此后一直是"永远回退中文"，且不报错。详见 `MAINTENANCE.md` §十一之五 |
+| 语言跟随（**只在宿主 ≤0.1.5-rc.3 上成立；0.1.7 起静默失效，已修、待真机复核**） | 命令描述与提问卡片随 `locale.preference`（缺失时回退简体中文）。**这条记录不再代表当前行为**：读值用的 `settings.get(ns)` 与监听用的 `settings/updated` 都在 dsh `0.1.7-rc.2` 被移除，而两者分别走可选链与静默订阅，所以此后一直是"永远回退中文"，且不报错。详见 `MAINTENANCE.md` §三 坑 18 |
 | 命令面与工具面同源 | `/peer connect` 报告 `pc-2 / 本对话内 / 200 / 未运行`，`peer_list` 报告 `"Peer B" · tier=session · remaining=200 · peer=not running`，逐项一致 |
 | **撤销** | `/peer revoke Peer B` → 双方视图同步为空；**紧接着 `peer_send` 重新弹出授权卡片**，证明撤销是在投递校验处生效，而非仅仅从列表里抹掉 |
 | **拒绝** | 拒绝那张卡片后：不创建通道、收件箱不变、对端全程仍是 `not running`（没被唤醒）、零 token |
@@ -443,7 +443,7 @@ peer 消息**不能**：批准任何东西、修改任何权限、发起新的 p
 | 顺带验证：卡的标签→档位映射 | **已验（真机）** | 改文案后点「仅这一次」，工具输出 `tier=once, remaining=0`——本地化标签仍按值身份回落到正确的档位 |
 | 顺带验证：`once` 的"一次往来" | **已验（真机）** | 点「仅这一次」→ 投递后 `remaining=0` → 对端回信**没有再弹卡**（答复搭同一张批准），回信抬头为 `user-granted for one exchange` → 事后 `peer_list` 显示通道已自动作废、无挂起请求 |
 | 授权失败的措辞 | 待验 | 需要让卡片无法显示（例如在没有 answerer 的路径上调）；已有单元测试 |
-| 卡片带名（`wait.callId`）生效 | **已验（真机，2026-09-30）** | 点卡片 X 后**工具调用保持等待**（请求存活）；匿名卡会立刻以 `ASK_CANCELLED` 返回。见 `MAINTENANCE.md` §十一之八的判别表 |
+| 卡片带名（`wait.callId`）生效 | **已验（真机，2026-09-30）** | 点卡片 X 后**工具调用保持等待**（请求存活）；匿名卡会立刻以 `ASK_CANCELLED` 返回。见 `MAINTENANCE.md` §三 坑 17 的判别表 |
 | 带名卡的主路径 | **已验（真机）** | 重启后 `peer_send` →「仅这一次」→ `tier=once, remaining=0` 投递成功、审计行落盘 |
 | 命令路径仍匿名 | **已验（单测）** | `/peer connect` 没有 callId，请求里不带 `wait`（真实命令路径只能在 GUI 里跑） |
 
