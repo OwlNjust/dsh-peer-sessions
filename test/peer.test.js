@@ -32,6 +32,8 @@ import { isRuntimeRoot, askGrant } from '../lib/consent.js'
 import { PeerCore, PeerRefusal, CORE_DEFAULTS } from '../lib/core.js'
 import { registerTools } from '../lib/tools.js'
 import { registerCommands } from '../lib/commands.js'
+import { GRANT_RECORD, REVOKE_RECORD, appendGrant, appendRevoke } from '../lib/grants.js'
+import { Session, appendPluginRecord } from '@deepseek-ai/dsh-session'
 
 // ---------------------------------------------------------------- test doubles
 
@@ -120,8 +122,17 @@ function fakeCtx({
   locale,
   revive = false,
   resolved = undefined,
+  // Live `Session` objects by id. A real `Session` (from `@deepseek-ai/dsh-session`)
+  // is required wherever durability is exercised, because `appendPluginRecord`
+  // writes through a private method — a plain object double would throw, which is
+  // the point: the test must use the same writer the Host does.
+  sessionFor = new Map(),
+  // Cold conversations by id, as `sessionController.inspect()` would return them:
+  // `{ events }`. Present only when a test wants the cross-log revocation check.
+  inspections = new Map(),
 }) {
   const received = []
+  const warnings = []
   /**
    * What each agent received, keyed by that agent's id.
    *
@@ -138,16 +149,21 @@ function fakeCtx({
     received,
     deliveredTo,
     asked,
+    warnings,
     /** Make a live agent cold again, the way an idle conversation becomes cold. */
     drop: (id) => agents.delete(id),
     agents: {
       get: (id) => agents.get(id),
       roots: () => [...agents.values()],
     },
-    sessions: { get: () => undefined },
+    sessions: { get: (id) => sessionFor.get(id) },
     sessionTitle: { get: () => undefined },
     workspaceRegistry: { archivedSessionIds: archived },
     settings: { describe: () => [{ ns: 'locale', value: locale }] },
+    // A plugin's only sanctioned diagnostic channel (`console.*` is not its to
+    // write), captured so a test can assert a persistence failure was reported
+    // rather than swallowed.
+    logger: { warn: (message) => warnings.push(String(message)) },
     get(name) {
       if (name === 'settings') return this.settings
       return undefined
@@ -174,6 +190,13 @@ function fakeCtx({
         const created = fakeAgent(id, received, deliveredTo)
         agents.set(id, created)
         return { agent: created }
+      },
+      // Cold-safe read, exactly the shape `sessionController.inspect` returns
+      // that the plugin uses: the persisted event prefix, with no wake.
+      inspect: async (id) => {
+        const found = inspections.get(id)
+        if (found === undefined) throw new Error(`no persisted session ${id}`)
+        return found
       },
     },
     userQuestions: {
@@ -1615,6 +1638,184 @@ test('apply reports a misspelled config field instead of ignoring it silently', 
   assert.equal(warnings.length, 1, 'no warning for a config that names real fields')
 })
 
+// --------------------------------------------------- durable grants (v1.3.0)
+
+// The feature: an approval outlives the process. The oracle is the Host's own
+// writer and reader (`appendPluginRecord` / `pluginRecordOf`) against a REAL
+// `Session`, not a restatement of the record format — the same discipline as the
+// format-v4 admission test above. A plain object double cannot even be written
+// to (the writer goes through a private method), which is why these tests build
+// sessions with `Session.create`.
+//
+// A "restart" here is exactly what it is in production: a NEW `PeerStore` and a
+// NEW `PeerCore` reading the same persisted conversation.
+function restarted(sessionFor, options = {}) {
+  return wirePlugin({ grant: null, ...options, sessionFor })
+}
+
+test('a grant outlives the process: the same human is not asked twice', async () => {
+  const session = Session.create(SELF)
+  const first = wirePlugin({ grant: 1, sessionFor: new Map([[SELF, session]]) })
+  assert.match(await first.call('peer_send', { peer: PEER, kind: 'notice', summary: 'opener' }), /Delivered/)
+  assert.equal(first.ctx.asked.length, 1)
+  assert.ok(session.log.some((event) => event.type === GRANT_RECORD), 'the approval is in the log')
+
+  const second = restarted(new Map([[SELF, session]]))
+  assert.match(await second.call('peer_list', {}), /Peer channels \(1\)/, 'the channel came back')
+  assert.match(
+    await second.call('peer_send', { peer: PEER, kind: 'notice', summary: 'after restart' }),
+    /Delivered/,
+  )
+  assert.equal(second.ctx.asked.length, 0, 'a decision already made is not asked again')
+})
+
+test('a spent `once` channel stays spent, and the request it carried survives', async () => {
+  const session = Session.create(SELF)
+  const first = wirePlugin({ grant: 0, sessionFor: new Map([[SELF, session]]) })
+  const sent = await first.call('peer_send', { peer: PEER, kind: 'request', summary: 'one exchange', replyWithin: '10m' })
+  const requestId = /request id: (\S+)/.exec(sent)[1]
+
+  const second = restarted(new Map([[SELF, session]]))
+  const listed = await second.call('peer_list', {})
+  assert.match(listed, /remaining=0 \(messages[^)]*its answer still rides this grant\)/)
+  assert.ok(listed.includes(requestId), 'the carried request is still named')
+
+  // The answer rides the SAME approval — on the peer's side, which is the only
+  // side a `once` grant lets answer.
+  const answered = await second.call(
+    'peer_send',
+    { peer: SELF, kind: 'reply', replyTo: requestId, summary: 'answer' },
+    { agent: second.ctx.agents.get(PEER) },
+  )
+  assert.match(answered, /Delivered/)
+  assert.equal(second.ctx.asked.length, 0, 'the exchange was already bought')
+})
+
+test('a revoke is durable: the channel does not come back after a restart', async () => {
+  const session = Session.create(SELF)
+  const first = wirePlugin({ grant: 1, sessionFor: new Map([[SELF, session]]) })
+  await first.call('peer_send', { peer: PEER, kind: 'notice', summary: 'opener' })
+
+  const handlers = captureCommands(first.core)
+  const revoked = await handlers.peer({ agent: first.ctx.agents.get(SELF), rawInput: `revoke ${PEER}`, signal: undefined })
+  assert.equal(revoked.kind, 'success')
+  assert.ok(session.log.some((event) => event.type === REVOKE_RECORD), 'a tombstone was written')
+
+  const second = restarted(new Map([[SELF, session]]))
+  assert.match(await second.call('peer_list', {}), /No peer channels open/)
+})
+
+test('a revocation written while the granting conversation was cold still wins', async () => {
+  const granting = Session.create(SELF)
+  const revoking = Session.create(PEER)
+  const channel = {
+    id: 'pc-7',
+    a: SELF,
+    b: PEER,
+    tier: 'session',
+    remaining: 42,
+    createdAt: Date.now() - 60_000,
+    createdBy: SELF,
+    lastActivityAt: Date.now() - 60_000,
+    openRequests: new Map(),
+  }
+  appendGrant(granting, channel)
+  appendRevoke(revoking, channel)
+
+  // The granting conversation is live; the revoking one is COLD, so its
+  // tombstone is only reachable through `sessionController.inspect()`.
+  const { call } = restarted(new Map([[SELF, granting]]), { inspections: new Map([[PEER, { events: revoking.log }]]) })
+  assert.match(await call('peer_list', {}), /No peer channels open/)
+})
+
+test('records this build cannot read are skipped, not guessed at', async () => {
+  const session = Session.create(SELF)
+  // One good channel, so "nothing at all" cannot be mistaken for success.
+  appendGrant(session, {
+    id: 'pc-1',
+    a: SELF,
+    b: PEER,
+    tier: 'session',
+    remaining: 3,
+    createdBy: SELF,
+    openRequests: new Map(),
+  })
+  // A future payload version, and an unknown tier: both must be ignored whole.
+  appendPluginRecord(session, GRANT_RECORD, { v: 2, channel: { id: 'pc-2', a: SELF, b: PEER, tier: 'session', remaining: 3 } })
+  appendPluginRecord(session, GRANT_RECORD, { v: 1, channel: { id: 'pc-3', a: SELF, b: PEER, tier: 'forever', remaining: 3 } })
+
+  const { call, store } = restarted(new Map([[SELF, session]]))
+  assert.match(await call('peer_list', {}), /Peer channels \(1\)/)
+  assert.equal(store.channelsFor(SELF).length, 1)
+  assert.equal(store.channelsFor(SELF)[0].remaining, 3)
+})
+
+test('a failed durable write never fails the delivery it describes', async () => {
+  // A Session-shaped object with no private writer: the real writer refuses it,
+  // which is the failure mode a detached or future-incompatible log produces.
+  const broken = { log: [] }
+  const { call, ctx, store } = wirePlugin({ grant: 1, sessionFor: new Map([[SELF, broken]]) })
+  assert.match(await call('peer_send', { peer: PEER, kind: 'notice', summary: 'still delivered' }), /Delivered/)
+  assert.equal(ctx.received.length, 1, 'the peer got it anyway')
+  assert.equal(store.channelsFor(SELF).length, 1, 'and the process keeps using the channel')
+  assert.ok(
+    ctx.warnings.some((line) => /could not persist channel/.test(line)),
+    'the failure is logged rather than swallowed',
+  )
+})
+
+test('the approval is recorded where the human gave it, never in the peer log', async () => {
+  const selfLog = Session.create(SELF)
+  const peerLog = Session.create(PEER)
+  const { call } = wirePlugin({
+    grant: 1,
+    sessionFor: new Map([
+      [SELF, selfLog],
+      [PEER, peerLog],
+    ]),
+  })
+  await call('peer_send', { peer: PEER, kind: 'notice', summary: 'opener' })
+  assert.ok(selfLog.log.some((event) => event.type === GRANT_RECORD))
+  assert.equal(peerLog.log.length, 0, 'the peer conversation never approved anything')
+})
+
+test('a channel the PEER granted can be revoked from a log that never held it', async () => {
+  const selfLog = Session.create(SELF)
+  const peerLog = Session.create(PEER)
+  appendGrant(peerLog, {
+    id: 'pc-9',
+    a: PEER,
+    b: SELF,
+    tier: 'session',
+    remaining: 17,
+    createdBy: PEER,
+    openRequests: new Map(),
+  })
+
+  const { ctx, core } = wirePlugin({
+    sessionFor: new Map([
+      [SELF, selfLog],
+      [PEER, peerLog],
+    ]),
+  })
+  assert.equal(core.store.between(SELF, PEER), undefined, 'nothing in memory: the grant is the peer\'s')
+
+  const handlers = captureCommands(core)
+  const out = await handlers.peer({ agent: ctx.agents.get(SELF), rawInput: `revoke ${PEER}`, signal: undefined })
+  assert.equal(out.kind, 'success')
+  // Both live ends now carry the tombstone, so neither can resurrect it.
+  assert.ok(selfLog.log.some((event) => event.type === REVOKE_RECORD))
+  assert.ok(peerLog.log.some((event) => event.type === REVOKE_RECORD))
+
+  const second = restarted(
+    new Map([
+      [SELF, selfLog],
+      [PEER, peerLog],
+    ]),
+  )
+  assert.match(await second.call('peer_list', {}), /No peer channels open/)
+})
+
 // ------------------------------------------------------------- packaging
 
 // Two install routes activate the SAME row id, and nothing downstream rejects
@@ -2018,11 +2219,13 @@ function wirePlugin(options = {}) {
   const registered = []
   ctx.tools = { register: (definition) => (registered.push(definition), () => {}) }
   const store = sharedStore ? undefined : new PeerStore()
+  let core
   if (apply) {
     ctx.inject = (_deps, callback) => callback({ commands: { register: () => () => {} } })
     pluginEntry.apply(ctx)
   } else {
-    registerTools(ctx, new PeerCore(ctx, store, translator(DEFAULT_LOCALE)))
+    core = new PeerCore(ctx, store, translator(DEFAULT_LOCALE))
+    registerTools(ctx, core)
   }
   const tools = new Map(registered.map((definition) => [definition.name, definition]))
   // Captured rather than discarded: the sender-side audit only exists as
@@ -2042,7 +2245,7 @@ function wirePlugin(options = {}) {
   // `store` is exposed so a test can assert the state a path leaves BEHIND, not
   // just what it returned — the difference that matters for read and reply
   // markers.
-  return { ctx, call, tools, store, deferred, selfAgent: ctx.agents.get(SELF) }
+  return { ctx, call, tools, store, deferred, core, selfAgent: ctx.agents.get(SELF) }
 }
 
 test('the plugin entry declares its services and wires both halves in apply()', async () => {

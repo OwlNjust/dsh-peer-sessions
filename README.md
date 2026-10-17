@@ -172,21 +172,35 @@ Two things worth knowing before you edit it:
 
 ## Data and boundaries
 
-Everything this plugin owns is **in process memory**. Nothing is written to disk, and
-nothing is written into a session log:
+**Grants are written into a session log; everything else stays in process memory.**
 
-- Channels, grants, the inbox, pending deadlines — all of it is a map keyed by session id,
-  and **a restart clears it**. Grants die with the process; that is the documented scope of
-  "for this conversation", not an oversight.
-- Because nothing is a session event, this state **cannot be replayed or recovered from a
-  transcript**. `peer_inbox(id)`'s promise ("the body stays readable") is bounded by the
-  life of the host process.
-- Why not persist it: a custom session-event `type` is refused by the persistence reader
-  unless it carries `ignorable: true`, which a live `Session.append()` cannot set — the
-  session would then be unopenable. See `docs/design.md` H2 and `MAINTENANCE.md` §2.1.
-- Two consequences worth stating plainly: a **plugin re-apply** (the loader reloading after
-  a file change) keeps the channels, while **disabling and re-enabling the row** also keeps
-  them — they are not cleared on unload, only by the process ending.
+- **Grants are durable (since v1.3.0)**: opening a channel appends one **plugin record** to
+  the log of the conversation whose human approved it — `ignorable: true`, type
+  `plugin:dsh-peer-sessions/channel`, never model-visible, outside the released event
+  vocabulary. A channel therefore survives a dsh restart, a plugin reload, and a
+  disable/enable cycle, until `/peer revoke`. Revocation is durable too: the tombstone goes
+  to every live end of the pair, and when the granting conversation was cold at that moment
+  it is reconciled from that conversation's log on its next load
+  (`sessionController.inspect()`, which does not wake anything).
+- **The inbox, pending deadlines, hop memory and the rate window remain in process
+  memory.** They describe deliveries in flight, and a restart ends that half.
+  `peer_inbox(id)`'s promise ("the body stays readable") is therefore bounded by the life
+  of the host process, not by the log's life.
+- **The grant lives where it was given, not in the peer's log** — the peer's human never saw
+  that card. After a restart the channel comes back once the GRANTING conversation loads
+  it; the other end asking first gets its own card, which is honest: its human never
+  approved anything.
+- **Quota is durable as well**: spends, and a `once` channel's spent exchange, are in the
+  log, so a restart does not hand back a fresh budget.
+- **A fork carries the grant records** (the log is copied), so the fork continues the
+  channel — it is still the same human and the same history.
+- Why this is possible now: dsh 0.2.1's `appendPluginRecord` writes an `ignorable` event
+  OUTSIDE the vocabulary. The earlier rejection of a custom `type` was right — it would
+  have made the session unopenable; plugin records pay no such price. See `docs/design.md`
+  §6 and `MAINTENANCE.md` §十一之九/§十一之十.
+- **Requires dsh >= 0.2.1**: older Hosts have no `appendPluginRecord`. The plugin still
+  works there; grants merely fall back to their previous process lifetime and one warning
+  is logged. An unsupported Host never fails to load because of this.
 
 ## Uninstall
 
