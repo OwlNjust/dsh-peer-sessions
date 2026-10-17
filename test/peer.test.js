@@ -1728,6 +1728,65 @@ test('a revocation written while the granting conversation was cold still wins',
   assert.match(await call('peer_list', {}), /No peer channels open/)
 })
 
+// MERGE ACROSS TWO LOGS — the live failure this pins, caught on the first real
+// run of v1.3.0. A revoked pc-1 and re-granted pc-2; the tombstone had also gone
+// into the peer's log, because both ends were live at revoke time. When the peer
+// was later WOKEN and hydrated, replaying its old tombstone unconditionally
+// deleted the caller's newer channel from the SHARED store: `peer_list` showed
+// "no peer channels open" while the log still held a live grant. Record times
+// now decide — the newest write per pair wins, whichever log it came from.
+//
+// A small sleep between appends is deliberate: two records in the same
+// millisecond cannot be ordered, and the rule for ties is "later op wins".
+async function tick() {
+  await new Promise((resolve) => setTimeout(resolve, 8))
+}
+
+test('an OLD tombstone in the other log cannot delete a NEWER grant', async () => {
+  const selfLog = Session.create(SELF)
+  const peerLog = Session.create(PEER)
+  const channel = (id) => ({ id, a: SELF, b: PEER, tier: 'session', remaining: 7, createdBy: SELF, openRequests: new Map() })
+
+  appendGrant(selfLog, channel('pc-1'))
+  appendRevoke(selfLog, channel('pc-1'))
+  appendRevoke(peerLog, channel('pc-1'))
+  await tick()
+  appendGrant(selfLog, channel('pc-2'))
+
+  const { core, store } = wirePlugin({
+    sessionFor: new Map([
+      [SELF, selfLog],
+      [PEER, peerLog],
+    ]),
+  })
+  await core.hydrate(SELF)
+  assert.equal(store.between(SELF, PEER)?.id, 'pc-2', 'the caller sees its newer channel')
+  await core.hydrate(PEER)
+  assert.equal(store.between(SELF, PEER)?.id, 'pc-2', 'the peer replaying its old tombstone must not delete it')
+})
+
+test('a NEWER tombstone in the other log still wins', async () => {
+  const selfLog = Session.create(SELF)
+  const peerLog = Session.create(PEER)
+  const channel = { id: 'pc-1', a: SELF, b: PEER, tier: 'session', remaining: 7, createdBy: SELF, openRequests: new Map() }
+  const sessions = new Map([[SELF, selfLog]])
+
+  appendGrant(selfLog, channel)
+  await tick()
+  appendRevoke(peerLog, channel)
+
+  const { core, store } = wirePlugin({ sessionFor: sessions })
+  // The peer is cold here, so the grant is adopted; the cross-check runs only
+  // for live/inspectable sessions and must not guess.
+  await core.hydrate(SELF)
+  assert.equal(store.between(SELF, PEER)?.id, 'pc-1')
+
+  // The peer is woken later and replays its NEWER tombstone: that one wins.
+  sessions.set(PEER, peerLog)
+  await core.hydrate(PEER)
+  assert.equal(store.between(SELF, PEER), undefined)
+})
+
 test('records this build cannot read are skipped, not guessed at', async () => {
   const session = Session.create(SELF)
   // One good channel, so "nothing at all" cannot be mistaken for success.
