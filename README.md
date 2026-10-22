@@ -249,14 +249,31 @@ grep -c dsh-peer-sessions ~/.dsh/profiles/web/cordis.patch.yml   # → 0
 
 ## Installation
 
-**Two routes exist; use one.** Both activate the same plugin id. Nothing rejects the
-duplication — the composer lists the row twice and the loader mounts that id **once, last
-one wins, with no warning** (measured on 0.2.0-rc.2; see `MAINTENANCE.md` §一 安装). So
-the cost is not a crash but a **silently shadowed row**: whichever copy comes later decides
-the row's `config`, which is the kind of thing you discover after an afternoon of
-wondering why a setting did nothing.
+**Use one route.** They all activate the same plugin id. Nothing rejects the duplication —
+the composer lists the row twice and the loader mounts that id **once, last one wins, with
+no warning** (measured on 0.2.0-rc.2; see `MAINTENANCE.md` §一 安装). So the cost is not a
+crash but a **silently shadowed row**: whichever copy comes later decides the row's
+`config`, which is the kind of thing you discover after an afternoon of wondering why a
+setting did nothing.
 
-### Route A — as a bundle (desktop "Manage plugins" / repository URL)
+### Route A — as a bundle, from npm or a repository URL
+
+Published on npm as [`dsh-peer-sessions`](https://www.npmjs.com/package/dsh-peer-sessions):
+
+```sh
+dsh plugin --profile web add dsh-peer-sessions
+```
+
+- The manager mounts it as a **composition layer**; **no profile file is edited by hand**;
+- Pin a version: `dsh plugin --profile web add dsh-peer-sessions@1.3.2`;
+- Upgrade: `dsh plugin --profile web add dsh-peer-sessions@<new-version>` (the manager has no
+  "update" command; it is a reinstall);
+- Desktop: paste **`dsh-peer-sessions`** into "Manage plugins" — the CLI is not needed.
+
+> Installing runs the package's **code** (like any plugin): it reads your sessions and sends
+> messages from tool calls. Read the source first, or try it somewhere without credentials.
+
+#### The other Route A source: a repository URL (git snapshot)
 
 This package declares `dsh.bundle`, so dsh **0.2.0+**'s plugin manager treats it
 as a **composition layer**: installing it takes effect by itself, with **no

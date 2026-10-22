@@ -186,9 +186,24 @@ grep -c dsh-peer-sessions ~/.dsh/profiles/web/cordis.patch.yml   # → 0
 
 ## 安装
 
-**两条路线，只能选一条。** 它们都会激活同一个插件 id。重复不会有人拦——组合层会把这一行列两次，加载器把该 id **只挂一次、靠后者胜出、且没有任何警告**（0.2.0-rc.2 实测，见 `MAINTENANCE.md` §一 安装）。所以代价不是崩溃，而是**一行被静默遮蔽**：靠后的那份决定该行的 `config`，而这种事往往要花掉一个下午才会发现"某个设置根本没生效"。
+**一次只用一条路线。** 它们都会激活同一个插件 id。重复不会有人拦——组合层会把这一行列两次，加载器把该 id **只挂一次、靠后者胜出、且没有任何警告**（0.2.0-rc.2 实测，见 `MAINTENANCE.md` §一 安装）。所以代价不是崩溃，而是**一行被静默遮蔽**：靠后的那份决定该行的 `config`，而这种事往往要花掉一个下午才会发现"某个设置根本没生效"。
 
-### 路线 A：作为组合包安装（桌面端「管理插件」/ 仓库地址）
+### 路线 A：作为组合包安装 —— 来源可以是 npm 或仓库地址
+
+本包已发布到 npm（[`dsh-peer-sessions`](https://www.npmjs.com/package/dsh-peer-sessions)），普通用户用这一条：
+
+```sh
+dsh plugin --profile web add dsh-peer-sessions
+```
+
+- 装完由管理器当作**组合层**处理，**不需要手改任何 profile 文件**；
+- 想固定版本：`dsh plugin --profile web add dsh-peer-sessions@1.3.2`；
+- 升级：`dsh plugin --profile web add dsh-peer-sessions@<新版本>`（管理器本身没有"更新"按钮，等价于重装）；
+- 桌面端：在「管理插件」里填 **`dsh-peer-sessions`**（包名）即可，不必用 CLI。
+
+> 安装会执行包里的**代码**（和任何插件一样）：它读写你的会话、在工具调用里发消息。看一遍源码再装，或先装在无凭据的环境里试。
+
+#### 路线 A 的另一种来源：仓库地址（git 快照）
 
 本包声明了 `dsh.bundle`，所以 dsh **0.2.0+** 的插件管理器会把它当作**组合层**：装完自动生效，
 **不需要手改任何 profile 文件**。
