@@ -42,7 +42,7 @@
 | H3 | 授权由插件**直接**向人取得，模型不经手 | `consent.js` |
 | H4 | peer 消息不升级任何权限 | `core.js` / `tools.js` |
 
-## 二、当前状态（v1.3.1）
+## 二、当前状态（v1.3.2）
 
 ### 已验证（真机，dsh 0.2.1-rc.2）
 
@@ -226,10 +226,10 @@
 ```sh
 npm test && ./scripts/privacy-scan.sh
 npm pack --dry-run            # 逐行看清单：报告类文件必须在包外
-git push origin main v1.3.1   # 分支与 tag 一起推（tag 用 annotated）
+git push origin main v1.3.2   # 分支与 tag 一起推（tag 用 annotated）
 git status --short            # 必须为空
 git ls-files -s install.sh    # 必须是 100755
-git ls-remote origin refs/heads/main 'refs/tags/v1.3.1^{}'   # 两个都等于本地 HEAD
+git ls-remote origin refs/heads/main 'refs/tags/v1.3.2^{}'   # 两个都等于本地 HEAD
 ```
 
 推送细节（代理、凭据）因机器而异，见本机 `MAINTENANCE-NOTES.md`；Windows 侧"已修改"是视错觉（坑 13）。
@@ -252,4 +252,4 @@ git ls-remote origin refs/heads/main 'refs/tags/v1.3.1^{}'   # 两个都等于�
 | 模型怎么用这个插件 | `skill/peer-session/SKILL.md` |
 | 真机验过什么、怎么验的 | `docs/design.md` §12 + 本文 §二 |
 | 安装/配置/数据边界 | `README.zh.md` / `README.md` |
-| 完整历史与逐次推理 | `git log`、`git tag -n`（含 `v1.3.1`） |
+| 完整历史与逐次推理 | `git log`、`git tag -n`（含 `v1.3.2`） |
