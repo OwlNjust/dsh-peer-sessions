@@ -155,7 +155,7 @@ const addressable = items.filter(s =>
 
 **授权写进会话日志，其余一切都在进程内存里。**
 
-- **授权是持久的（v1.3.0 起）**：通道建立时，一条**插件记录**写进**批准它的那个会话**的日志——`ignorable: true`、类型 `plugin:dsh-peer-sessions/channel`、不进模型可见面、不进已发布的事件词汇表。于是**重启 dsh、插件重载、停用再启用之后，通道仍在**，直到你用 `/peer revoke` 撤销。撤销本身也是持久的：墓碑写给两端所有活着的会话，批准方当时是冷的话，它下次加载时跨日志核对（`sessionController.inspect()`，不唤醒）。
+- **授权是持久的（v1.3.0 起）**：通道建立时，一条**插件记录**写进**批准它的那个会话**的日志——`ignorable: true`、类型 `plugin:dsh-peer-sessions/channel`、不进模型可见面、不进已发布的事件词汇表。于是**重启 dsh、插件重载、停用再启用之后，通道仍在**，直到你用 `/peer revoke` 撤销。撤销本身也是持久的：墓碑写给两端所有活着的会话，批准方当时是冷的话，它下次加载时跨日志核对（读冷会话的日志，不唤醒）。
 - **收件箱、待答期限、hop 记忆、速率窗口仍只在进程内存里**：它们描述的是"在途的投递"，重启结束在途的这一半。`peer_inbox(id)` 那句"正文仍可取回"的边界因此是**宿主进程的生命周期**，不是日志的生命周期。
 - **授权记在批准方，不记在对端**：对端的人从没见过那张卡片。所以重启后，通道要等**批准方**先把它加载回来；对端先发话时会重新问它自己的人要卡片——它的人确实没批准过任何东西。
 - **额度也是持久的**：花掉的投递、`once` 档的"已花掉这一次往来"都写进日志，重启不会重发额度。
@@ -197,7 +197,7 @@ dsh plugin --profile web add dsh-peer-sessions
 ```
 
 - 装完由管理器当作**组合层**处理，**不需要手改任何 profile 文件**；
-- 想固定版本：`dsh plugin --profile web add dsh-peer-sessions@1.3.2`；
+- 想固定版本：`dsh plugin --profile web add dsh-peer-sessions@1.3.3`；
 - 升级：`dsh plugin --profile web add dsh-peer-sessions@<新版本>`（管理器本身没有"更新"按钮，等价于重装）；
 - 桌面端：在「管理插件」里填 **`dsh-peer-sessions`**（包名）即可，不必用 CLI。
 

@@ -42,12 +42,13 @@
 | H3 | 授权由插件**直接**向人取得，模型不经手 | `consent.js` |
 | H4 | peer 消息不升级任何权限 | `core.js` / `tools.js` |
 
-## 二、当前状态（v1.3.2）
+## 二、当前状态（v1.3.3）
 
-### 已验证（真机，dsh 0.2.1-rc.2）
+### 已验证（真机，dsh 0.2.1-rc.2；0.2.2-rc.1 已复核契约与冷读路径）
 
 - **授权持久化**：通道跨重启仍在，额度随花随记；`/peer revoke` 的墓碑跨重启生效；撤销后重建正常。
 - **跨日志合并**：真机抓到"旧墓碑删掉新授权"，已修（坑 19）。
+- **0.2.2 的冷读**：宿主删掉了 `sessionController.inspect()`，跨日志撤销核对改为 `sessionQuery.readSession`（坑 22）；0.2.1 与 0.2.2 都走同一条路径。
 - **忙时合并投递**：对端 45 秒任务期间连发 3 条通知 → **一个回合读一批**（3/3 段、按 `sent` 排序）；反方向同样成立（对端两条回信在我忙时合成一批）。
 - **授权卡片**在 0.2.1 上可用（不带档位的 `/peer connect` 弹卡，带档位不弹）。
 - 每条消息带 `sent:`；`peer_inbox` 按 id 取回正文，并正确处理已读/未答/已回复。
@@ -65,7 +66,7 @@
 - 请求期限改为"被读到"起算（现为发送时起算；长任务下会提前超时）。见 `docs/design.md` §7。
 - 其余没有已知欠账。**先问用户最近用起来哪里别扭**——这个项目里真机比推理更会教人。
 
-## 三、踩过的坑（21 条）
+## 三、踩过的坑（22 条）
 
 > 每条只留：症状 / 根因与规则。排查过程和证据在引用的提交里。
 
@@ -150,9 +151,30 @@
 - 症状：写入抛"non-JSON-serializable data"，被 `persist` 吞掉，授权根本没落盘。
 - 规则：`appendPluginRecord` 要求**无损 JSON**；可选字段**省略**而不是置 `undefined`。真机上这些字段总在，所以**只有测试能抓**。
 
+### 坑 22：宿主把冷读搬走了，旧调用**不报错**，只是读不到（dsh 0.2.2）
+- 症状：0.2.2 上插件照常加载、照常能发消息，但**跨日志撤销核对**与"撤销只存在于日志里的通道"两条路径静默失效——被撤销的通道会复活，`/peer revoke` 报"没有可撤销的通道"。
+- 根因：`sessionController.inspect()` 在 **0.2.2 被删除**（原型上已无此方法；`SessionController.prototype` 只有 `events/state/follow/observeEvent/…`）。插件的调用有 `typeof` 守卫，**不崩**，所以"绿"得毫无破绽。
+- 规则：冷读改走 `ctx.sessionQuery.readSession(id)`（0.2.1 与 0.2.2 都有，返回同一份完整原始事件日志，不唤醒 Agent），`sessionController.inspect()` 只作退路。**凡是"读不到就退让"的契约**（坑 18 的同一族），升级时必须有一条**只提供新契约**的测试——本包的两条新测试就是这种形状。
+
 ## 四、Host 契约与升级复核
 
-### 依赖的契约（0.2.1-rc.2 现状）
+### 依赖的契约（0.2.2-rc.1 现状，2026-11-08 复核）
+
+| 契约 | 现状 |
+|---|---|
+| `sessionController.inspect` | **0.2.2 已删除**；冷读改用 `ctx.sessionQuery.readSession(id)`（坑 22） |
+| `sessionController.list/resolveAgent` | `{items}` / `{agent}|{error}`，签名不变 |
+| `sessionController.events` | 0.2.2 新增；返回 `records[]`（原始 wire 事件，含 `ignorable`），但**分页按消息计**，读日志尾部不如 `readSession` 直接 |
+| `Agent.inbox` | `nextTurn` / `replace(id, msg)` / `remove(id)` 全部不变（`dsh-agent-loop` 内部换了实现，外部契约没动） |
+| `ctx.tools` | 服务类型由 `ToolRuntime` 改名 `ToolsService`；`register(definition, options?)` 兼容旧调用 |
+| `dsh-tools` 导出 | `CodeRunFailedError` / `TOOL_RUNTIME_SCHEDULER` / `renderToolsSdk*` / `jsonSchemaToPy|Ts` 已移除；本包只依赖 `defineTool`，未受影响 |
+| `dsh-llm` / `dsh-client-locale` / `dsh-session` / `dsh-session-format-v3-to-v4` | 导出集合不变；`createUserMessage` / `boundContextSummary` / `appendPluginRecord` / `pluginRecordOf` / `assertV4RowAdmission` 逐字相同 |
+| `SessionStore` / `AgentRegistry` / `CommandRuntime` / `UserQuestionService` / `SessionTitleService` | 插件用到的成员全在（`get/roots/register/ask/get`） |
+| 宿主包集合 | 0.2.2 新增 `dsh-experimental-forge-bundle`、`dsh-experimental-liveshare`、`dsh-official-bundles`、`dsh-personalized-recommendations`；无删除，与本包无交集 |
+| 会话格式 | 仍为 **v4**；`assertV4RowAdmission` 规则未变 |
+| `engines.dsh` | 声明 `>=0.2.0-0`，对 0.2.2-rc.1 依然成立（**没有上界**是刻意的） |
+
+### 旧版契约（0.2.1-rc.2，仍然有效）
 
 | 契约 | 现状 |
 |---|---|
@@ -188,6 +210,7 @@
 | 阈值硬编码、用户改不了 | `Config` + 每字段默认值 | `6081abc`、`7d30cb5` |
 | 跨日志墓碑删掉新授权 | 按记录时间合并 | `564db42`（坑 19） |
 | 忙时 N 条 = N 个过时回合 | 未读队列内就地合并 | `d8e2016`（`docs/design.md` §7.1） |
+| 宿主删掉冷读接口，跨日志撤销静默失效 | 冷读改走 `sessionQuery.readSession` | 坑 22 |
 
 ## 五、测试与发布
 
@@ -226,10 +249,10 @@
 ```sh
 npm test && ./scripts/privacy-scan.sh
 npm pack --dry-run            # 逐行看清单：报告类文件必须在包外
-git push origin main v1.3.2   # 分支与 tag 一起推（tag 用 annotated）
+git push origin main v1.3.3   # 分支与 tag 一起推（tag 用 annotated）
 git status --short            # 必须为空
 git ls-files -s install.sh    # 必须是 100755
-git ls-remote origin refs/heads/main 'refs/tags/v1.3.2^{}'   # 两个都等于本地 HEAD
+git ls-remote origin refs/heads/main 'refs/tags/v1.3.3^{}'   # 两个都等于本地 HEAD
 ```
 
 推送细节（代理、凭据）因机器而异，见本机 `MAINTENANCE-NOTES.md`；Windows 侧"已修改"是视错觉（坑 13）。
@@ -252,4 +275,4 @@ git ls-remote origin refs/heads/main 'refs/tags/v1.3.2^{}'   # 两个都等于�
 | 模型怎么用这个插件 | `skill/peer-session/SKILL.md` |
 | 真机验过什么、怎么验的 | `docs/design.md` §12 + 本文 §二 |
 | 安装/配置/数据边界 | `README.zh.md` / `README.md` |
-| 完整历史与逐次推理 | `git log`、`git tag -n`（含 `v1.3.2`） |
+| 完整历史与逐次推理 | `git log`、`git tag -n`（含 `v1.3.3`） |

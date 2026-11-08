@@ -202,7 +202,7 @@ Two things worth knowing before you edit it:
   disable/enable cycle, until `/peer revoke`. Revocation is durable too: the tombstone goes
   to every live end of the pair, and when the granting conversation was cold at that moment
   it is reconciled from that conversation's log on its next load
-  (`sessionController.inspect()`, which does not wake anything).
+  (a cold read of the log that does not wake anything).
 - **The inbox, pending deadlines, hop memory and the rate window remain in process
   memory.** They describe deliveries in flight, and a restart ends that half.
   `peer_inbox(id)`'s promise ("the body stays readable") is therefore bounded by the life
@@ -265,7 +265,7 @@ dsh plugin --profile web add dsh-peer-sessions
 ```
 
 - The manager mounts it as a **composition layer**; **no profile file is edited by hand**;
-- Pin a version: `dsh plugin --profile web add dsh-peer-sessions@1.3.2`;
+- Pin a version: `dsh plugin --profile web add dsh-peer-sessions@1.3.3`;
 - Upgrade: `dsh plugin --profile web add dsh-peer-sessions@<new-version>` (the manager has no
   "update" command; it is a reinstall);
 - Desktop: paste **`dsh-peer-sessions`** into "Manage plugins" — the CLI is not needed.

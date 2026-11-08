@@ -169,6 +169,12 @@ function fakeCtx({
   // Cold conversations by id, as `sessionController.inspect()` would return them:
   // `{ events }`. Present only when a test wants the cross-log revocation check.
   inspections = new Map(),
+  // dsh 0.2.2 removed `sessionController.inspect()`; the cold read moved to the
+  // session query engine. `queryEngine: true` exposes `ctx.sessionQuery`, and
+  // `noInspect: true` removes the old method, so a test can reproduce a 0.2.2
+  // host exactly.
+  queryEngine = false,
+  noInspect = false,
   // Give the fake agents a real-ish `inbox` so merge-while-busy can be exercised.
   merge = false,
 }) {
@@ -186,6 +192,20 @@ function fakeCtx({
   const agents = new Map(agentIds.map((id) => [id, fakeAgent(id, received, deliveredTo, merge)]))
   const asked = []
   const listeners = new Map()
+  /**
+   * The dsh 0.2.2+ cold read: `readSession` returns the complete raw event log
+   * of a cold conversation, without activating an Agent — the same shape the
+   * removed `sessionController.inspect()` returned.
+   */
+  const sessionQuery = queryEngine
+    ? {
+        readSession: async (id) => {
+          const found = inspections.get(id)
+          if (found === undefined) throw new Error(`no persisted session ${id}`)
+          return found
+        },
+      }
+    : undefined
   return {
     received,
     deliveredTo,
@@ -209,6 +229,7 @@ function fakeCtx({
     logger: { warn: (message) => warnings.push(String(message)) },
     get(name) {
       if (name === 'settings') return this.settings
+      if (name === 'sessionQuery') return sessionQuery
       return undefined
     },
     on(event, listener) {
@@ -236,11 +257,15 @@ function fakeCtx({
       },
       // Cold-safe read, exactly the shape `sessionController.inspect` returns
       // that the plugin uses: the persisted event prefix, with no wake.
-      inspect: async (id) => {
-        const found = inspections.get(id)
-        if (found === undefined) throw new Error(`no persisted session ${id}`)
-        return found
-      },
+      ...(noInspect
+        ? {}
+        : {
+            inspect: async (id) => {
+              const found = inspections.get(id)
+              if (found === undefined) throw new Error(`no persisted session ${id}`)
+              return found
+            },
+          }),
     },
     userQuestions: {
       ask: async (request) => {
@@ -1766,9 +1791,95 @@ test('a revocation written while the granting conversation was cold still wins',
   appendRevoke(revoking, channel)
 
   // The granting conversation is live; the revoking one is COLD, so its
-  // tombstone is only reachable through `sessionController.inspect()`.
+  // tombstone is only reachable through the Host's cold read.
   const { call } = restarted(new Map([[SELF, granting]]), { inspections: new Map([[PEER, { events: revoking.log }]]) })
   assert.match(await call('peer_list', {}), /No peer channels open/)
+})
+
+// dsh 0.2.2 REMOVED `sessionController.inspect()` (verified against the installed
+// 0.2.2-rc.1 prototype) and moved the cold read to the session query engine.
+// A plugin that keeps calling the old method does not crash — the call is
+// guarded — but it silently loses every cold read, and with it the cross-log
+// revocation check: a channel the peer revoked while this side was cold comes
+// back from the dead. These two tests pin the replacement.
+test('a cold peer log is still read on a host without sessionController.inspect', async () => {
+  const granting = Session.create(SELF)
+  const revoking = Session.create(PEER)
+  const channel = {
+    id: 'pc-8',
+    a: SELF,
+    b: PEER,
+    tier: 'session',
+    remaining: 42,
+    createdAt: Date.now() - 60_000,
+    createdBy: SELF,
+    lastActivityAt: Date.now() - 60_000,
+    openRequests: new Map(),
+  }
+  appendGrant(granting, channel)
+  appendRevoke(revoking, channel)
+
+  // A 0.2.2 host: no `inspect`, and the query engine instead.
+  const { call } = restarted(
+    new Map([[SELF, granting]]),
+    { inspections: new Map([[PEER, { events: revoking.log }]]), queryEngine: true, noInspect: true },
+  )
+  assert.match(await call('peer_list', {}), /No peer channels open/)
+})
+
+test('a channel that only exists in a cold log can still be revoked', async () => {
+  const granting = Session.create(SELF)
+  const channel = {
+    id: 'pc-9',
+    a: SELF,
+    b: PEER,
+    tier: 'session',
+    remaining: 42,
+    createdAt: Date.now() - 60_000,
+    createdBy: SELF,
+    lastActivityAt: Date.now() - 60_000,
+    openRequests: new Map(),
+  }
+  appendGrant(granting, channel)
+
+  // The granting conversation is COLD here: the channel exists only in its log,
+  // so `/peer revoke` has to read that log to find it.
+  const { ctx, core } = restarted(new Map(), {
+    inspections: new Map([[SELF, { events: granting.log }]]),
+    queryEngine: true,
+    noInspect: true,
+  })
+  const handlers = captureCommands(core)
+  const revoked = await handlers.peer({ agent: ctx.agents.get(SELF), rawInput: `revoke ${PEER}`, signal: undefined })
+  assert.equal(revoked.kind, 'success')
+  assert.match(revoked.text ?? '', /pc-9/)
+})
+
+test('without a cold read at all the same revoke cannot find the channel', async () => {
+  // The counterfactual: a host that has neither the query engine nor the
+  // removed `inspect`. The channel is only in a cold log, so the revoke has
+  // nothing to withdraw and says so instead of reporting a fake success.
+  const granting = Session.create(SELF)
+  const channel = {
+    id: 'pc-10',
+    a: SELF,
+    b: PEER,
+    tier: 'session',
+    remaining: 42,
+    createdAt: Date.now() - 60_000,
+    createdBy: SELF,
+    lastActivityAt: Date.now() - 60_000,
+    openRequests: new Map(),
+  }
+  appendGrant(granting, channel)
+
+  const { ctx, core } = restarted(new Map(), {
+    inspections: new Map([[SELF, { events: granting.log }]]),
+    noInspect: true,
+  })
+  const handlers = captureCommands(core)
+  const revoked = await handlers.peer({ agent: ctx.agents.get(SELF), rawInput: `revoke ${PEER}`, signal: undefined })
+  assert.equal(revoked.kind, 'error')
 })
 
 // MERGE ACROSS TWO LOGS — the live failure this pins, caught on the first real
