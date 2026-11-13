@@ -780,6 +780,45 @@ test('isRuntimeRoot is false for an agent that is live but owned by another', ()
   assert.equal(isRuntimeRoot(ctx, live), false)
 })
 
+// dsh 0.2.2-rc.3 removed `AgentRegistry.roots()`, and the old check threw
+// `ctx.agents.roots is not a function` — which took down every peer tool, not
+// just the consent card. The rule now comes from the user-questions service.
+test('isRuntimeRoot asks userQuestions when the registry has no roots()', () => {
+  const agent = { id: 'sess-root' }
+  const ctx = {
+    agents: { get: (id) => (id === agent.id ? agent : undefined) }, // no roots()
+    userQuestions: {
+      // The Host's own rule: identity first, then whatever it uses for roots.
+      assertLiveRoot: (candidate) => {
+        if (ctx.agents.get(candidate.id) !== candidate) throw new Error('CALLER_NOT_LIVE')
+      },
+    },
+  }
+  assert.equal(isRuntimeRoot(ctx, agent), true)
+  assert.equal(isRuntimeRoot(ctx, { id: 'ghost' }), false)
+})
+
+test('isRuntimeRoot refuses when assertLiveRoot refuses', () => {
+  const agent = { id: 'sess-child' }
+  const ctx = {
+    agents: { get: () => agent },
+    userQuestions: {
+      assertLiveRoot: () => {
+        throw new Error('DELEGATED_CALLER')
+      },
+    },
+  }
+  assert.equal(isRuntimeRoot(ctx, agent), false)
+})
+
+test('a peer tool still runs when the registry has no roots()', async () => {
+  // The live failure: `peer_list` threw "ctx.agents.roots is not a function".
+  const { call, ctx } = wirePlugin({ items: [summary(SELF)] })
+  delete ctx.agents.roots
+  ctx.userQuestions = { assertLiveRoot: () => {}, ask: async () => ({ answers: [] }) }
+  assert.match(await call('peer_list', {}), /No peer channels open/)
+})
+
 // ------------------------------------------------------------------- deliver
 
 test('deliver refuses to send when the peer fell out of the sidebar', async () => {

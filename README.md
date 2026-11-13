@@ -265,7 +265,7 @@ dsh plugin --profile web add dsh-peer-sessions
 ```
 
 - The manager mounts it as a **composition layer**; **no profile file is edited by hand**;
-- Pin a version: `dsh plugin --profile web add dsh-peer-sessions@1.3.3`;
+- Pin a version: `dsh plugin --profile web add dsh-peer-sessions@1.3.4`;
 - Upgrade: `dsh plugin --profile web add dsh-peer-sessions@<new-version>` (the manager has no
   "update" command; it is a reinstall);
 - Desktop: paste **`dsh-peer-sessions`** into "Manage plugins" — the CLI is not needed.

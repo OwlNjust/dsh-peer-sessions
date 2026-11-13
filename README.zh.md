@@ -197,7 +197,7 @@ dsh plugin --profile web add dsh-peer-sessions
 ```
 
 - 装完由管理器当作**组合层**处理，**不需要手改任何 profile 文件**；
-- 想固定版本：`dsh plugin --profile web add dsh-peer-sessions@1.3.3`；
+- 想固定版本：`dsh plugin --profile web add dsh-peer-sessions@1.3.4`；
 - 升级：`dsh plugin --profile web add dsh-peer-sessions@<新版本>`（管理器本身没有"更新"按钮，等价于重装）；
 - 桌面端：在「管理插件」里填 **`dsh-peer-sessions`**（包名）即可，不必用 CLI。
 

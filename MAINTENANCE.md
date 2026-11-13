@@ -42,9 +42,9 @@
 | H3 | 授权由插件**直接**向人取得，模型不经手 | `consent.js` |
 | H4 | peer 消息不升级任何权限 | `core.js` / `tools.js` |
 
-## 二、当前状态（v1.3.3）
+## 二、当前状态（v1.3.4）
 
-### 已验证（真机，dsh 0.2.1-rc.2；0.2.2-rc.1 已复核契约与冷读路径）
+### 已验证（真机，dsh 0.2.1-rc.2；0.2.2-rc.3 已复核契约、冷读路径与权限判断）
 
 - **授权持久化**：通道跨重启仍在，额度随花随记；`/peer revoke` 的墓碑跨重启生效；撤销后重建正常。
 - **跨日志合并**：真机抓到"旧墓碑删掉新授权"，已修（坑 19）。
@@ -66,7 +66,7 @@
 - 请求期限改为"被读到"起算（现为发送时起算；长任务下会提前超时）。见 `docs/design.md` §7。
 - 其余没有已知欠账。**先问用户最近用起来哪里别扭**——这个项目里真机比推理更会教人。
 
-## 三、踩过的坑（22 条）
+## 三、踩过的坑（23 条）
 
 > 每条只留：症状 / 根因与规则。排查过程和证据在引用的提交里。
 
@@ -156,13 +156,21 @@
 - 根因：`sessionController.inspect()` 在 **0.2.2 被删除**（原型上已无此方法；`SessionController.prototype` 只有 `events/state/follow/observeEvent/…`）。插件的调用有 `typeof` 守卫，**不崩**，所以"绿"得毫无破绽。
 - 规则：冷读改走 `ctx.sessionQuery.readSession(id)`（0.2.1 与 0.2.2 都有，返回同一份完整原始事件日志，不唤醒 Agent），`sessionController.inspect()` 只作退路。**凡是"读不到就退让"的契约**（坑 18 的同一族），升级时必须有一条**只提供新契约**的测试——本包的两条新测试就是这种形状。
 
+### 坑 23：宿主删了 `agents.roots()`，**每个** peer 工具都直接抛错（dsh 0.2.2-rc.3）
+- 症状：升级到 rc.3 后 `peer_list` 直接报 `Error: ctx.agents.roots is not a function`；四个工具全不可用，不是"静默降级"而是硬崩。
+- 根因：rc.3 删除了 `AgentRegistry.roots()`（以及 `enter(agent, owner)` 的 owner 参数、`isOwnedBy`），`isRuntimeRoot` 用来判断"这个 agent 有没有人类答话者"的第二条检查因此抛错——而它位于 `callerGuard`，是**每次工具调用**的必经之路。
+- 规则：**别自己重推宿主的所有权规则**。同一句话宿主已经实现了：`ctx.userQuestions.assertLiveRoot(agent)`（rc.1 按 owner 判，rc.3 改为按 `session.header.origin` 判，方法名与语义稳定），插件的 `isRuntimeRoot` 直接调它、捕获异常。留 `agents.roots()` 作老宿主的退路。教训：契约表里的每个调用点，都要有"**该方法不存在时**"的测试。
+
 ## 四、Host 契约与升级复核
 
-### 依赖的契约（0.2.2-rc.1 现状，2026-11-08 复核）
+### 依赖的契约（0.2.2-rc.3 现状，2026-11-13 复核）
 
 | 契约 | 现状 |
 |---|---|
 | `sessionController.inspect` | **0.2.2 已删除**；冷读改用 `ctx.sessionQuery.readSession(id)`（坑 22） |
+| `agents.get` | 仍在；`agents.roots()` 与 `isOwnedBy` 在 **rc.3 已删除**——权限判断改问 `userQuestions.assertLiveRoot`（坑 23） |
+| `Agent.inbox` | `nextTurn` / `replace` / `remove` 在 rc.3 仍在（合并投递依赖它） |
+| `settings.describe` / `settings/document-updated` | 仍在；事件多了 `revision` 参数（插件只读 ns，不受影响） |
 | `sessionController.list/resolveAgent` | `{items}` / `{agent}|{error}`，签名不变 |
 | `sessionController.events` | 0.2.2 新增；返回 `records[]`（原始 wire 事件，含 `ignorable`），但**分页按消息计**，读日志尾部不如 `readSession` 直接 |
 | `Agent.inbox` | `nextTurn` / `replace(id, msg)` / `remove(id)` 全部不变（`dsh-agent-loop` 内部换了实现，外部契约没动） |
@@ -211,6 +219,7 @@
 | 跨日志墓碑删掉新授权 | 按记录时间合并 | `564db42`（坑 19） |
 | 忙时 N 条 = N 个过时回合 | 未读队列内就地合并 | `d8e2016`（`docs/design.md` §7.1） |
 | 宿主删掉冷读接口，跨日志撤销静默失效 | 冷读改走 `sessionQuery.readSession` | 坑 22 |
+| 宿主删掉 `agents.roots()`，四个工具全部抛错 | 权限判断改问 `userQuestions.assertLiveRoot` | 坑 23 |
 
 ## 五、测试与发布
 
@@ -249,10 +258,10 @@
 ```sh
 npm test && ./scripts/privacy-scan.sh
 npm pack --dry-run            # 逐行看清单：报告类文件必须在包外
-git push origin main v1.3.3   # 分支与 tag 一起推（tag 用 annotated）
+git push origin main v1.3.4   # 分支与 tag 一起推（tag 用 annotated）
 git status --short            # 必须为空
 git ls-files -s install.sh    # 必须是 100755
-git ls-remote origin refs/heads/main 'refs/tags/v1.3.3^{}'   # 两个都等于本地 HEAD
+git ls-remote origin refs/heads/main 'refs/tags/v1.3.4^{}'   # 两个都等于本地 HEAD
 ```
 
 推送细节（代理、凭据）因机器而异，见本机 `MAINTENANCE-NOTES.md`；Windows 侧"已修改"是视错觉（坑 13）。
@@ -275,4 +284,4 @@ git ls-remote origin refs/heads/main 'refs/tags/v1.3.3^{}'   # 两个都等于�
 | 模型怎么用这个插件 | `skill/peer-session/SKILL.md` |
 | 真机验过什么、怎么验的 | `docs/design.md` §12 + 本文 §二 |
 | 安装/配置/数据边界 | `README.zh.md` / `README.md` |
-| 完整历史与逐次推理 | `git log`、`git tag -n`（含 `v1.3.3`） |
+| 完整历史与逐次推理 | `git log`、`git tag -n`（含 `v1.3.4`） |
